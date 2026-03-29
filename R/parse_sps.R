@@ -9,6 +9,14 @@
 #'
 #' @param sps_path Path to the .SPS file
 #' @return List of parsed commands
+#' @examples
+#' \dontrun{
+#' # Parse an SPSS syntax file
+#' parsed <- parse_sps("analysis.sps")
+#' length(parsed)
+#' parsed[[1]]$command_type
+#' parsed[[1]]$raw
+#' }
 #' @export
 parse_sps <- function(sps_path) {
   raw <- readLines(sps_path, warn = FALSE, encoding = "UTF-8")

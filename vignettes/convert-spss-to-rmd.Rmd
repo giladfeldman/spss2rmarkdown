@@ -1,0 +1,140 @@
+---
+title: "Converting SPSS Syntax to R Markdown"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Converting SPSS Syntax to R Markdown}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Overview
+
+The `spss2rmarkdown` package converts SPSS `.sps` syntax files into
+self-contained R Markdown reports. The generated reports use the **jmv**
+package for statistical analyses and preserve original SPSS syntax as
+foldable comments for easy comparison.
+
+## The Conversion Pipeline
+
+Conversion follows three steps:
+
+1. **Parse** the `.sps` file into structured command objects.
+2. **Convert** each SPSS command to equivalent R code.
+3. **Generate** an R Markdown document assembling the converted code.
+
+### Step 1: Parse the Syntax File
+
+`parse_sps()` reads a `.sps` file, strips comments, normalises whitespace,
+splits commands on the SPSS period terminator, and returns a list of parsed
+command objects.
+
+```{r parse-example, eval = FALSE}
+library(spss2rmarkdown)
+
+parsed <- parse_sps("analysis.sps")
+length(parsed)
+parsed[[1]]$command_type
+parsed[[1]]$raw
+```
+
+Each element contains fields such as `command_type`, `raw`, `subcommands`,
+`variables`, and `options`.
+
+### Step 1b: Parse the Data File
+
+`parse_sav()` reads an SPSS `.sav` file and extracts the data, variable
+metadata, and value labels.
+
+```{r parse-sav-example, eval = FALSE}
+sav_info <- parse_sav("data.sav")
+sav_info$n_obs
+sav_info$n_vars
+head(sav_info$metadata)
+```
+
+You can also generate R code that recreates the data-loading step:
+
+```{r load-code, eval = FALSE}
+cat(generate_data_load_code(sav_info, new_path = "data.sav"))
+```
+
+### Step 2: Convert
+
+`convert_all_commands()` dispatches each parsed command to the appropriate
+converter and returns R code along with metadata.
+
+```{r convert-example, eval = FALSE}
+converted <- convert_all_commands(parsed, sav_info)
+converted[[1]]$r_code
+converted[[1]]$analysis_type
+```
+
+For individual commands:
+
+```{r convert-single, eval = FALSE}
+result <- convert_spss_to_r(parsed[[1]], sav_info)
+cat(result$r_code)
+```
+
+### Step 3: Generate R Markdown
+
+`generate_rmd()` assembles a complete `.Rmd` file with YAML header, setup
+chunk, data loading, transformations, and analysis sections.
+
+```{r generate-example, eval = FALSE}
+rmd <- generate_rmd(
+  sav_data       = sav_info,
+  sav_path       = "data.sav",
+  parsed_syntax  = parsed,
+  converted_code = converted,
+  output_dir     = tempdir(),
+  base_name      = "analysis"
+)
+rmd$rmd_path
+```
+
+## Expression Conversion
+
+The expression converter translates SPSS syntax to R:
+
+```{r expr-examples}
+library(spss2rmarkdown)
+
+convert_spss_expression("MEAN(var1, var2, var3)")
+convert_spss_expression("MISSING(age)")
+convert_spss_expression("x = 1 AND y <> 0")
+```
+
+## Full Pipeline Example
+
+```{r full-pipeline, eval = FALSE}
+library(spss2rmarkdown)
+
+# Parse
+parsed   <- parse_sps("study.sps")
+sav_info <- parse_sav("study.sav")
+
+# Expand TO syntax (e.g., item1 TO item10)
+parsed <- lapply(parsed, expand_spss_variables, sav_info = sav_info)
+
+# Convert
+converted <- convert_all_commands(parsed, sav_info)
+
+# Generate R Markdown
+rmd <- generate_rmd(
+  sav_data       = sav_info,
+  sav_path       = "study.sav",
+  parsed_syntax  = parsed,
+  converted_code = converted,
+  output_dir     = "output"
+)
+
+cat("Report written to:", rmd$rmd_path)
+```

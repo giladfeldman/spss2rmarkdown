@@ -8,6 +8,14 @@
 #'
 #' @param sav_path Path to the .SAV file
 #' @return List containing data, metadata, and summary info
+#' @examples
+#' \dontrun{
+#' # Parse an SPSS .sav data file
+#' sav_info <- parse_sav("survey_data.sav")
+#' sav_info$n_obs
+#' sav_info$n_vars
+#' head(sav_info$metadata)
+#' }
 #' @export
 parse_sav <- function(sav_path) {
   if (!requireNamespace("haven", quietly = TRUE)) {
@@ -69,6 +77,11 @@ parse_sav <- function(sav_path) {
 #' @param sav_info Result from parse_sav()
 #' @param new_path Path to use in generated code
 #' @return Character string of R code
+#' @examples
+#' \dontrun{
+#' sav_info <- parse_sav("data.sav")
+#' cat(generate_data_load_code(sav_info, new_path = "data.sav"))
+#' }
 #' @export
 generate_data_load_code <- function(sav_info, new_path = "data.sav") {
   glue::glue('
