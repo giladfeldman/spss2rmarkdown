@@ -6,6 +6,10 @@
 \usage{
 extract_command_type(cmd)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+}
 \description{
 Recognizes full and abbreviated SPSS command names.
 }
+\keyword{internal}

@@ -6,6 +6,10 @@
 \usage{
 extract_recode_rules(cmd)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+}
 \description{
 Extract recode rules from RECODE command
 }
+\keyword{internal}

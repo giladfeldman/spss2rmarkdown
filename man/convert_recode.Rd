@@ -6,6 +6,12 @@
 \usage{
 convert_recode(parsed, sav_info)
 }
+\arguments{
+\item{parsed}{Parsed SPSS command object}
+
+\item{sav_info}{SAV file information from parse_sav()}
+}
 \description{
 Convert RECODE command - handles multiple source->target pairs
 }
+\keyword{internal}

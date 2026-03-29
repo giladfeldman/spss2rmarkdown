@@ -36,6 +36,8 @@ parse_sps <- function(sps_path) {
 }
 
 #' Remove SPSS comments from syntax
+#' @param syntax Character string of SPSS syntax text
+#' @keywords internal
 remove_comments <- function(syntax) {
   # Remove block comments /* ... */ (possibly spanning lines)
   syntax <- gsub("/\\*.*?\\*/", "", syntax, perl = TRUE)
@@ -57,6 +59,8 @@ remove_comments <- function(syntax) {
 }
 
 #' Normalize whitespace in syntax
+#' @param syntax Character string of SPSS syntax text
+#' @keywords internal
 normalize_whitespace <- function(syntax) {
   syntax <- gsub("[ \t]+", " ", syntax)
   lines <- strsplit(syntax, "\n")[[1]]
@@ -68,6 +72,8 @@ normalize_whitespace <- function(syntax) {
 #'
 #' SPSS commands are terminated by a period at the end of a line.
 #' We must not split on periods inside string literals or numbers.
+#' @param syntax Character string of SPSS syntax text
+#' @keywords internal
 split_commands <- function(syntax) {
   lines <- strsplit(syntax, "\n")[[1]]
 
@@ -105,6 +111,8 @@ split_commands <- function(syntax) {
 }
 
 #' Parse a single SPSS command
+#' @param cmd Character string of SPSS command text
+#' @keywords internal
 parse_single_command <- function(cmd) {
   if (is.null(cmd) || nchar(trimws(cmd)) == 0) {
     return(NULL)
@@ -132,6 +140,8 @@ parse_single_command <- function(cmd) {
 #' Extract the main command type
 #'
 #' Recognizes full and abbreviated SPSS command names.
+#' @param cmd Character string of SPSS command text
+#' @keywords internal
 extract_command_type <- function(cmd) {
   # Known SPSS commands - order matters: longer/multi-word matches first
   patterns <- c(
@@ -239,6 +249,8 @@ extract_command_type <- function(cmd) {
 #' Extract subcommands from a command
 #'
 #' Subcommands start with / and contain key=value or just key
+#' @param cmd Character string of SPSS command text
+#' @keywords internal
 extract_subcommands <- function(cmd) {
   # Split by / that appears at line start or after whitespace (not inside strings)
   parts <- strsplit(cmd, "(?<=\\s)/|(?<=^)/|\\n\\s*/", perl = TRUE)[[1]]
@@ -266,6 +278,9 @@ extract_subcommands <- function(cmd) {
 }
 
 #' Extract variables from a command
+#' @param cmd Character string of SPSS command text
+#' @param command_type Character string of SPSS command type
+#' @keywords internal
 extract_variables <- function(cmd, command_type) {
   result <- list(all = character())
 
@@ -546,6 +561,8 @@ extract_variables <- function(cmd, command_type) {
 }
 
 #' Extract the VARIABLES= clause
+#' @param cmd Character string of SPSS command text
+#' @keywords internal
 extract_variables_clause <- function(cmd) {
   # Try VARIABLES= first
   vars_match <- extract_pattern(cmd, "VARIABLES\\s*=?\\s*([^/]+)")
@@ -570,6 +587,9 @@ extract_variables_clause <- function(cmd) {
 }
 
 #' Extract a pattern match from command
+#' @param cmd Character string of SPSS command text
+#' @param pattern Regex pattern to extract
+#' @keywords internal
 extract_pattern <- function(cmd, pattern) {
   match <- regmatches(cmd, regexec(pattern, cmd, ignore.case = TRUE))[[1]]
   if (length(match) >= 2) {
@@ -579,6 +599,9 @@ extract_pattern <- function(cmd, pattern) {
 }
 
 #' Extract options from a command
+#' @param cmd Character string of SPSS command text
+#' @param command_type Character string of SPSS command type
+#' @keywords internal
 extract_options <- function(cmd, command_type) {
   options <- list()
 

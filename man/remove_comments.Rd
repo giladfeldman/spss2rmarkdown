@@ -6,6 +6,10 @@
 \usage{
 remove_comments(syntax)
 }
+\arguments{
+\item{syntax}{Character string of SPSS syntax text}
+}
 \description{
 Remove SPSS comments from syntax
 }
+\keyword{internal}

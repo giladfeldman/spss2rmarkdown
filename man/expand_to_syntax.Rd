@@ -6,6 +6,12 @@
 \usage{
 expand_to_syntax(vars, all_names)
 }
+\arguments{
+\item{vars}{Character vector of variable names}
+
+\item{all_names}{Character vector of all dataset variable names}
+}
 \description{
 Expand TO in a vector of variable names using a reference list
 }
+\keyword{internal}

@@ -6,6 +6,12 @@
 \usage{
 extract_options(cmd, command_type)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+
+\item{command_type}{Character string of SPSS command type}
+}
 \description{
 Extract options from a command
 }
+\keyword{internal}

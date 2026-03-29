@@ -6,6 +6,10 @@
 \usage{
 extract_subcommands(cmd)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+}
 \description{
 Subcommands start with / and contain key=value or just key
 }
+\keyword{internal}

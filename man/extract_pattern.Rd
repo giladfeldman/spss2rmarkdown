@@ -6,6 +6,12 @@
 \usage{
 extract_pattern(cmd, pattern)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+
+\item{pattern}{Regex pattern to extract}
+}
 \description{
 Extract a pattern match from command
 }
+\keyword{internal}

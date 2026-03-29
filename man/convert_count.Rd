@@ -6,6 +6,12 @@
 \usage{
 convert_count(parsed, sav_info)
 }
+\arguments{
+\item{parsed}{Parsed SPSS command object}
+
+\item{sav_info}{SAV file information from parse_sav()}
+}
 \description{
 Convert COUNT command -> rowSums of logical checks
 }
+\keyword{internal}

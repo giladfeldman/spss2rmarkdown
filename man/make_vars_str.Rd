@@ -6,6 +6,10 @@
 \usage{
 make_vars_str(vars)
 }
+\arguments{
+\item{vars}{Character vector of variable names}
+}
 \description{
 Build a c('VAR1', 'VAR2', ...) string for jmv arguments
 }
+\keyword{internal}

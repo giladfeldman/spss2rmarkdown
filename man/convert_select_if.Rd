@@ -6,6 +6,12 @@
 \usage{
 convert_select_if(parsed, sav_info)
 }
+\arguments{
+\item{parsed}{Parsed SPSS command object}
+
+\item{sav_info}{SAV file information from parse_sav()}
+}
 \description{
 Convert SELECT IF -> dplyr::filter
 }
+\keyword{internal}

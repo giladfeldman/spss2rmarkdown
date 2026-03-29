@@ -4,12 +4,8 @@
 # Suppress R CMD check NOTEs for NSE variables used in ggplot2
 utils::globalVariables(c(".data", "se", "ci_width"))
 
-#' Null-coalescing operator
-#' Returns x if not NULL, otherwise y
-#' @param x Left-hand value
-#' @param y Default value if x is NULL
-#' @return x if not NULL, otherwise y
-#' @keywords internal
+# Null-coalescing operator (not exported, no roxygen to avoid Rd pipe issues)
+# Returns x if not NULL, otherwise y
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
 #' Safe variable quoting for R code

@@ -6,7 +6,11 @@
 \usage{
 split_commands(syntax)
 }
+\arguments{
+\item{syntax}{Character string of SPSS syntax text}
+}
 \description{
 SPSS commands are terminated by a period at the end of a line.
 We must not split on periods inside string literals or numbers.
 }
+\keyword{internal}

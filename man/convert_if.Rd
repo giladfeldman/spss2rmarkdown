@@ -6,6 +6,12 @@
 \usage{
 convert_if(parsed, sav_info)
 }
+\arguments{
+\item{parsed}{Parsed SPSS command object}
+
+\item{sav_info}{SAV file information from parse_sav()}
+}
 \description{
 Convert IF command -> dplyr::mutate with if_else
 }
+\keyword{internal}

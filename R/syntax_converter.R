@@ -1039,6 +1039,9 @@ data <- data |>
 }
 
 #' Convert COUNT command -> rowSums of logical checks
+#' @param parsed Parsed SPSS command object
+#' @param sav_info SAV file information from parse_sav()
+#' @keywords internal
 convert_count <- function(parsed, sav_info) {
   target <- parsed$variables$target
   varlist_raw <- parsed$variables$varlist_raw
@@ -1076,6 +1079,9 @@ data[['{target}']] <- {checks}")
 }
 
 #' Convert RECODE command - handles multiple source->target pairs
+#' @param parsed Parsed SPSS command object
+#' @param sav_info SAV file information from parse_sav()
+#' @keywords internal
 convert_recode <- function(parsed, sav_info) {
   source_vars <- parsed$variables$source_vars
   target_vars <- parsed$variables$target_vars
@@ -1155,6 +1161,9 @@ convert_recode <- function(parsed, sav_info) {
 }
 
 #' Convert IF command -> dplyr::mutate with if_else
+#' @param parsed Parsed SPSS command object
+#' @param sav_info SAV file information from parse_sav()
+#' @keywords internal
 convert_if <- function(parsed, sav_info) {
   condition <- parsed$variables$condition
   target <- parsed$variables$target
@@ -1182,6 +1191,9 @@ data <- data |>
 }
 
 #' Convert SELECT IF -> dplyr::filter
+#' @param parsed Parsed SPSS command object
+#' @param sav_info SAV file information from parse_sav()
+#' @keywords internal
 convert_select_if <- function(parsed, sav_info) {
   condition <- parsed$variables$condition
   if (is.null(condition)) {
@@ -1399,6 +1411,8 @@ convert_spss_expression <- function(expr) {
 }
 
 #' Extract recode rules from RECODE command
+#' @param cmd Character string of SPSS command text
+#' @keywords internal
 extract_recode_rules <- function(cmd) {
   # Find all parenthesized rules: (old=new)
   matches <- gregexpr("\\(([^)]+)\\)", cmd)[[1]]
@@ -1432,6 +1446,8 @@ normalize_spss_names <- function(x) {
 }
 
 #' Build a c('VAR1', 'VAR2', ...) string for jmv arguments
+#' @param vars Character vector of variable names
+#' @keywords internal
 make_vars_str <- function(vars) {
   paste0("c(", paste0("'", vars, "'", collapse = ", "), ")")
 }
@@ -1466,6 +1482,9 @@ expand_spss_variables <- function(parsed_command, sav_info) {
 }
 
 #' Expand TO in a vector of variable names using a reference list
+#' @param vars Character vector of variable names
+#' @param all_names Character vector of all dataset variable names
+#' @keywords internal
 expand_to_syntax <- function(vars, all_names) {
   if (length(vars) < 3) return(vars)
 

@@ -6,6 +6,10 @@
 \usage{
 normalize_whitespace(syntax)
 }
+\arguments{
+\item{syntax}{Character string of SPSS syntax text}
+}
 \description{
 Normalize whitespace in syntax
 }
+\keyword{internal}

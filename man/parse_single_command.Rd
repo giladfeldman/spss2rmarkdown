@@ -6,6 +6,10 @@
 \usage{
 parse_single_command(cmd)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+}
 \description{
 Parse a single SPSS command
 }
+\keyword{internal}

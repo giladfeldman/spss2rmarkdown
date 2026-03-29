@@ -6,6 +6,10 @@
 \usage{
 extract_variables_clause(cmd)
 }
+\arguments{
+\item{cmd}{Character string of SPSS command text}
+}
 \description{
 Extract the VARIABLES= clause
 }
+\keyword{internal}
