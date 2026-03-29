@@ -1,6 +1,9 @@
 # utils.R
 # Utility functions for SPSS2R
 
+# Suppress R CMD check NOTEs for NSE variables used in ggplot2
+utils::globalVariables(c(".data", "se", "ci_width"))
+
 #' Null-coalescing operator
 #' Returns x if not NULL, otherwise y
 #' @param x Left-hand value

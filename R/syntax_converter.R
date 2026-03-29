@@ -32,6 +32,14 @@ DATA_COMMANDS <- c(
 #' @param parsed_commands List of parsed commands from [parse_sps()]
 #' @param sav_info SAV file info from [parse_sav()]
 #' @return List of conversion results, each containing r_code, packages, and analysis_type
+#' @examples
+#' \dontrun{
+#' parsed   <- parse_sps("analysis.sps")
+#' sav_info <- parse_sav("data.sav")
+#' converted <- convert_all_commands(parsed, sav_info)
+#' converted[[1]]$r_code
+#' converted[[1]]$analysis_type
+#' }
 #' @export
 convert_all_commands <- function(parsed_commands, sav_info) {
   results <- list()
@@ -56,6 +64,13 @@ convert_all_commands <- function(parsed_commands, sav_info) {
 #' @param parsed_command A single parsed command from [parse_sps()]
 #' @param sav_info SAV file info from [parse_sav()]
 #' @return List with r_code, packages, analysis_type, and optional error
+#' @examples
+#' \dontrun{
+#' parsed   <- parse_sps("analysis.sps")
+#' sav_info <- parse_sav("data.sav")
+#' result   <- convert_spss_to_r(parsed[[1]], sav_info)
+#' cat(result$r_code)
+#' }
 #' @export
 convert_spss_to_r <- function(parsed_command, sav_info) {
   cmd_type <- parsed_command$command_type
@@ -1306,6 +1321,10 @@ convert_unsupported <- function(parsed, sav_info) {
 #'
 #' @param expr SPSS expression string
 #' @return R expression string
+#' @examples
+#' convert_spss_expression("MEAN(var1, var2, var3)")
+#' convert_spss_expression("MISSING(age)")
+#' convert_spss_expression("x = 1 AND y <> 0")
 #' @export
 convert_spss_expression <- function(expr) {
   if (is.null(expr)) return("NA")
@@ -1425,6 +1444,13 @@ make_vars_str <- function(vars) {
 #' @param parsed_command A parsed command object
 #' @param sav_info SAV file info from [parse_sav()]
 #' @return The parsed command with TO syntax expanded
+#' @examples
+#' \dontrun{
+#' parsed   <- parse_sps("analysis.sps")
+#' sav_info <- parse_sav("data.sav")
+#' # Expand TO syntax (e.g., item1 TO item10)
+#' parsed <- lapply(parsed, expand_spss_variables, sav_info = sav_info)
+#' }
 #' @export
 expand_spss_variables <- function(parsed_command, sav_info) {
   all_names <- normalize_spss_names(sav_info$metadata$name)

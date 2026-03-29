@@ -16,9 +16,9 @@ Imports:
     dplyr (>= 1.1.0),
     glue (>= 1.6.0),
     stringr (>= 1.5.0),
-    rmarkdown (>= 2.20),
     jsonlite
 Suggests:
+    rmarkdown (>= 2.20),
     jmv,
     tidyr,
     ggplot2,

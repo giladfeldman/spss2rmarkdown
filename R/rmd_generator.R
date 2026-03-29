@@ -14,6 +14,20 @@
 #' @param options Rendering options
 #' @param base_name Optional base name for output files
 #' @return List with rmd_path and data_path
+#' @examples
+#' \dontrun{
+#' parsed    <- parse_sps("analysis.sps")
+#' sav_info  <- parse_sav("data.sav")
+#' converted <- convert_all_commands(parsed, sav_info)
+#' rmd <- generate_rmd(
+#'   sav_data       = sav_info,
+#'   sav_path       = "data.sav",
+#'   parsed_syntax  = parsed,
+#'   converted_code = converted,
+#'   output_dir     = tempdir()
+#' )
+#' rmd$rmd_path
+#' }
 #' @export
 generate_rmd <- function(sav_data, sav_path, parsed_syntax, converted_code,
                          output_dir, options = list(), base_name = NULL) {

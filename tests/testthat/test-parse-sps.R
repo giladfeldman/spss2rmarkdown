@@ -7,7 +7,11 @@ parse_one <- function(spss_text) {
   on.exit(unlink(tmp))
   writeLines(spss_text, tmp)
   result <- parse_sps(tmp)
-  if (length(result) > 0) result[[1]] else NULL
+  if (length(result) > 0) {
+    # Strip names from command_type (parser uses regex patterns as names)
+    result[[1]]$command_type <- unname(result[[1]]$command_type)
+    result[[1]]
+  } else NULL
 }
 
 # =============================================================================
