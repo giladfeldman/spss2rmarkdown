@@ -1674,6 +1674,71 @@ data <- data |>
 #' @param parsed Parsed SPSS command object
 #' @param sav_info SAV file information from parse_sav()
 #' @keywords internal
+#' Build a match-predicate factory from an SPSS COUNT criterion
+#'
+#' Returns a function that, given an R expression for a column, produces the
+#' R predicate testing whether that column matches the SPSS criterion.
+#' A criterion is a comma/space separated list of TERMS, each of which is a
+#' single value, a range, or the MISSING/SYSMIS keyword; a value matches when
+#' it satisfies ANY term. Supported forms:
+#'   \code{1}                single value    -> \code{x == 1}
+#'   \code{1,2,3}            value list      -> \code{x \%in\% c(1, 2, 3)}
+#'   \code{1 THRU 3}         inclusive range -> \code{x >= 1 & x <= 3}
+#'   \code{LO THRU 3} / \code{1 THRU HI}     -> open-ended range
+#'   \code{MISSING} / \code{SYSMIS}          -> \code{is.na(x)}
+#'   \code{MISSING, LO THRU -1}              -> mixed list of the above
+#' SPSS accepts \code{THR}/\code{THRU}/\code{THROUGH} as spellings of the
+#' range keyword. An unrecognised term falls back to equality against its
+#' literal text so behaviour is never silently dropped.
+#' @param count_value Raw text from inside the COUNT parentheses.
+#' @keywords internal
+.s2r_count_match_expr <- function(count_value) {
+  crit <- trimws(as.character(count_value)[1])
+  thru_re <- "\\b(THRU|THR|THROUGH)\\b"
+
+  # Split the criterion into terms. Commas always separate; bare whitespace
+  # separates too, EXCEPT inside a "<lo> THRU <hi>" range, so protect ranges
+  # first by rewriting their internal spaces to a sentinel.
+  protected <- gsub(paste0("([^,[:space:]]+)\\s+", thru_re, "\\s+([^,[:space:]]+)"),
+                    "\\1\001\\2\001\\3", crit, ignore.case = TRUE, perl = TRUE)
+  terms <- trimws(strsplit(protected, "[,[:space:]]+")[[1]])
+  terms <- terms[nzchar(terms)]
+
+  # Build one predicate per term; a value matches if ANY term matches.
+  preds <- lapply(terms, function(term) {
+    parts <- strsplit(term, "\001", fixed = TRUE)[[1]]
+    if (length(parts) == 3) {           # a protected range
+      lo <- trimws(parts[1]); hi <- trimws(parts[3])
+      lo_open <- grepl("^(LO|LOWEST)$", lo, ignore.case = TRUE)
+      hi_open <- grepl("^(HI|HIGHEST)$", hi, ignore.case = TRUE)
+      return(function(x) {
+        bounds <- c(if (!lo_open) paste0(x, " >= ", lo),
+                    if (!hi_open) paste0(x, " <= ", hi))
+        if (!length(bounds)) paste0("!is.na(", x, ")")
+        else paste0("(", paste(bounds, collapse = " & "), ")")
+      })
+    }
+    if (grepl("^(MISSING|SYSMIS)$", term, ignore.case = TRUE)) {
+      return(function(x) paste0("is.na(", x, ")"))
+    }
+    function(x) paste0(x, " == ", term)
+  })
+
+  if (!length(preds)) return(function(x) paste0(x, " == ", crit)) # keep literal
+
+  # A pure list of plain values reads better (and shorter) as %in%.
+  plain <- vapply(terms, function(t)
+    !grepl("\001", t, fixed = TRUE) &&
+    !grepl("^(MISSING|SYSMIS)$", t, ignore.case = TRUE), logical(1))
+  if (length(terms) > 1 && all(plain)) {
+    return(function(x) paste0(x, " %in% c(", paste(terms, collapse = ", "), ")"))
+  }
+  if (length(preds) == 1) return(preds[[1]])
+
+  function(x) paste0("(", paste(vapply(preds, function(f) f(x), character(1)),
+                                collapse = " | "), ")")
+}
+
 convert_count <- function(parsed, sav_info) {
   target <- parsed$variables$target
   varlist_raw <- parsed$variables$varlist_raw
@@ -1699,8 +1764,33 @@ convert_count <- function(parsed, sav_info) {
 
   expanded <- expand_to_syntax(norm_vars, all_names)
 
-  # Build the rowSums expression
-  checks <- paste0("(data[['", expanded, "']] == ", count_value, ")", collapse = " + ")
+  # Build the per-variable match test. `count_value` is the RAW text inside the
+  # parentheses, which SPSS allows to be more than a single value:
+  #   (1)          single value
+  #   (1,2,3)      value LIST  — match ANY of them
+  #   (1 THRU 3)   inclusive RANGE
+  # Interpolating that text straight into `== {count_value}` produced
+  # `== 1,2,3` / `== 1 THRU 3`, neither of which is valid R. knitr then failed
+  # the whole chunk, losing EVERY COUNT in the file rather than just this one.
+  match_expr <- .s2r_count_match_expr(count_value)
+
+  # SPSS COUNT never yields missing: a value that is missing simply does not
+  # match, and the count stays defined. Guard each test so NA contributes 0
+  # rather than propagating NA through the sum. The one exception is a
+  # criterion that deliberately counts missings (MISSING / SYSMIS) — there a
+  # `!is.na(x) &` guard would cancel the very thing being counted, so wrap in
+  # isTRUE-style NA coercion instead of excluding NA rows.
+  counts_missing <- grepl("\\b(MISSING|SYSMIS)\\b", count_value, ignore.case = TRUE)
+  checks <- vapply(expanded, function(v) {
+    x <- paste0("data[['", v, "']]")
+    if (counts_missing) {
+      # NA-safe truthiness: NA in the predicate becomes FALSE (contributes 0).
+      paste0("(!is.na(", match_expr(x), ") & ", match_expr(x), ")")
+    } else {
+      paste0("(!is.na(", x, ") & ", match_expr(x), ")")
+    }
+  }, character(1))
+  checks <- paste(checks, collapse = " + ")
 
   r_code <- glue::glue("
 data[['{target}']] <- {checks}")

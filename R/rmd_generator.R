@@ -102,6 +102,32 @@ s2r_render_model <- function(model) {
   print(summary(model)); invisible()
 }
 
+# Make a converter's r_code safe to substitute as the RHS of `.res <- <r_code>`.
+#
+# Several converters degrade to a comment-only stub when they cannot resolve
+# their variables (e.g. "# FACTOR: No variables specified"). Substituted into
+# the analysis-chunk template that becomes `.res <- # FACTOR: ...`, a comment
+# is not an expression: `.res` is never bound and the following
+# `s2r_render_tables(.res)` raises "object '.res' not found" — a hard,
+# user-visible "Analysis error" where a silent skip was intended.
+#
+# Appending an explicit `NULL` line keeps such a stub a parseable no-op
+# (s2r_render_tables(NULL) renders nothing) while leaving the explanatory
+# comment visible in the generated .Rmd. Real code is returned untouched.
+#
+# This runs at GENERATION time, so it is a package-internal helper and is not
+# deparsed into the emitted .Rmd like the render-time helpers below.
+.s2r_expression_safe_rcode <- function(r_code) {
+  code <- paste(as.character(r_code), collapse = "\n")
+  # Does the code parse to at least one expression on its own? Comments and
+  # whitespace parse cleanly but yield zero expressions — exactly the stub case.
+  parsed <- tryCatch(parse(text = code), error = function(e) NULL)
+  if (!is.null(parsed) && length(parsed) > 0) {
+    return(code)
+  }
+  paste0(code, "\n  NULL")
+}
+
 # Build the hidden setup chunk that defines the helpers inside the generated
 # .Rmd, via deparse() of the live functions (no escaping, no file dependency).
 .s2r_helpers_chunk <- function() {
@@ -597,6 +623,17 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
       ""
     }
 
+    # The chunk template substitutes r_code as the RHS of `.res <- <r_code>`.
+    # A converter that degrades to a comment-only stub (e.g.
+    # "# FACTOR: No variables specified") therefore emits
+    # `.res <- # FACTOR: ...` — a comment is not an expression, so `.res` is
+    # never bound and the next line raises "object '.res' not found", turning
+    # an intended graceful skip into a hard user-visible Analysis error.
+    # Append an explicit NULL so any comment-only stub stays a parseable no-op.
+    # (s2r_render_tables(NULL) renders nothing.) Guard is at the single
+    # emission point so it covers every current and future stub converter.
+    res_rhs <- .s2r_expression_safe_rcode(conv$r_code)
+
     glue::glue('
 ## Analysis {i}: {conv$analysis_type}
 
@@ -605,7 +642,7 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
 ### R Code
 ```{{r analysis-{i}, results=\'asis\'}}
 tryCatch({{
-  .res <- {conv$r_code}
+  .res <- {res_rhs}
   s2r_render_tables(.res)
 }}, error = function(e) {{
   cat("\\n\\n**Analysis error:**", e$message, "\\n\\n")

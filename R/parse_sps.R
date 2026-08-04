@@ -1167,6 +1167,50 @@ extract_variables <- function(cmd, command_type) {
       result$factors <- character()
       result$all <- vars
     }
+
+  } else if (command_type == "FACTOR") {
+    # FACTOR /VARIABLES v1 v2 ... [/ANALYSIS ...] [/EXTRACTION ...] ...
+    # Same defect shape as EXAMINE above: FACTOR previously had no branch, so
+    # `all` stayed empty for EVERY syntax form and convert_factor() emitted
+    # "# FACTOR: No variables specified" as the RHS of `.res <- <r_code>` —
+    # a comment is not an expression, so `.res` was never bound and the
+    # following s2r_render_tables(.res) raised "object '.res' not found".
+    # /ANALYSIS names a subset of /VARIABLES for the extraction; it never
+    # introduces new variables, so `all` is deduped by the tail cleanup.
+    result$all <- extract_variables_clause(cmd)
+    result$analysis <- result$all
+
+  } else if (command_type == "MEANS") {
+    # MEANS /TABLES = dv1 dv2 BY factor1 [BY factor2] [/CELLS ...]
+    # (the /TABLES keyword is optional: "MEANS score BY condition" is valid).
+    # Variables before the first BY are the dependent variables; everything
+    # after a BY is a grouping factor. Same empty-`all` -> comment-stub ->
+    # "object '.res' not found" cascade as FACTOR/EXAMINE without this branch.
+    body <- extract_pattern(cmd, "TABLES\\s*=?\\s*([^/]+)")
+    if (is.null(body)) {
+      first_line <- strsplit(cmd, "\n")[[1]][1]
+      body <- sub("^MEANS\\s+", "", first_line, ignore.case = TRUE)
+      body <- sub("\\s*/.*", "", body)
+    }
+    body <- sub("\\.\\s*$", "", trimws(body))
+    if (grepl("\\bBY\\b", body, ignore.case = TRUE)) {
+      sides <- strsplit(body, "(?i)\\bBY\\b", perl = TRUE)[[1]]
+      dvs <- trimws(strsplit(trimws(sides[1]), "[,[:space:]]+")[[1]])
+      factors <- if (length(sides) > 1) {
+        trimws(strsplit(trimws(paste(sides[-1], collapse = " ")), "[,[:space:]]+")[[1]])
+      } else character()
+      dvs <- dvs[nchar(dvs) > 0]
+      factors <- factors[nchar(factors) > 0]
+      result$dependent <- dvs
+      result$factors <- factors
+      result$all <- c(dvs, factors)
+    } else {
+      vars <- trimws(strsplit(body, "[,[:space:]]+")[[1]])
+      vars <- vars[nchar(vars) > 0]
+      result$dependent <- vars
+      result$factors <- character()
+      result$all <- vars
+    }
   }
 
   # Clean up NULL values
