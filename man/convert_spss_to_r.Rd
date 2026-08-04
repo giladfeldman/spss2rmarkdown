@@ -4,12 +4,16 @@
 \alias{convert_spss_to_r}
 \title{Convert a single SPSS command to R code}
 \usage{
-convert_spss_to_r(parsed_command, sav_info)
+convert_spss_to_r(parsed_command, sav_info, all_var_names = NULL)
 }
 \arguments{
 \item{parsed_command}{A single parsed command from \code{\link[=parse_sps]{parse_sps()}}}
 
 \item{sav_info}{SAV file info from \code{\link[=parse_sav]{parse_sav()}}}
+
+\item{all_var_names}{Optional character vector of variable names used to
+expand \verb{var1 TO var10} ranges. See \code{\link[=convert_all_commands]{convert_all_commands()}}; when \code{NULL}
+(default) the names come from \code{sav_info}.}
 }
 \value{
 List with r_code, packages, analysis_type, and optional error

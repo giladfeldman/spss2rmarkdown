@@ -11,7 +11,9 @@ generate_rmd(
   converted_code,
   output_dir,
   options = list(),
-  base_name = NULL
+  base_name = NULL,
+  conversion_notes = list(),
+  secondary_sav_files = character()
 )
 }
 \arguments{
@@ -28,6 +30,14 @@ generate_rmd(
 \item{options}{Rendering options}
 
 \item{base_name}{Optional base name for output files}
+
+\item{conversion_notes}{Optional list of conversion notes/warnings to surface
+in the generated document}
+
+\item{secondary_sav_files}{Optional character vector of additional .sav paths
+uploaded alongside the primary one. Row-aligned files are merged into
+\code{data}; a row-count mismatch is skipped with a note rather than
+positionally cbind-ed (which would misalign rows).}
 }
 \value{
 List with rmd_path and data_path

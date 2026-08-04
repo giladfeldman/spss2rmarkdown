@@ -4,12 +4,16 @@
 \alias{expand_spss_variables}
 \title{Expand SPSS TO syntax in variable lists}
 \usage{
-expand_spss_variables(parsed_command, sav_info)
+expand_spss_variables(parsed_command, sav_info, all_var_names = NULL)
 }
 \arguments{
 \item{parsed_command}{A parsed command object}
 
 \item{sav_info}{SAV file info from \code{\link[=parse_sav]{parse_sav()}}}
+
+\item{all_var_names}{Optional character vector of variable names to expand
+\code{TO} ranges against, used when the names are not in the .sav dictionary
+(e.g. COMPUTE-created at runtime, or several paired .sav files).}
 }
 \value{
 The parsed command with TO syntax expanded

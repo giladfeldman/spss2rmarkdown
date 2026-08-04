@@ -1,6 +1,6 @@
 Package: spss2rmarkdown
 Title: Convert SPSS Syntax Files to Reproducible R Markdown Reports
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: person("Gilad", "Feldman", email = "giladfel@gmail.com",
                   role = c("aut", "cre"), comment = c(ORCID = "0000-0003-2990-8997"))
 Description: Converts SPSS .sps syntax files and .sav data files into reproducible
@@ -20,6 +20,8 @@ Imports:
 Suggests:
     rmarkdown (>= 2.20),
     jmv,
+    olsrr,
+    lubridate,
     tidyr,
     ggplot2,
     janitor,
@@ -29,6 +31,7 @@ Suggests:
     emmeans,
     car,
     broom,
+    modelsummary,
     kableExtra,
     testthat (>= 3.0.0),
     shiny,
@@ -36,5 +39,5 @@ Suggests:
 VignetteBuilder: knitr
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0

@@ -2,7 +2,7 @@
 % Please edit documentation in R/syntax_converter.R
 \name{convert_spss_expression}
 \alias{convert_spss_expression}
-\title{Convert SPSS expression to R expression}
+\title{to equivalent R expressions.}
 \usage{
 convert_spss_expression(expr)
 }
@@ -13,7 +13,6 @@ convert_spss_expression(expr)
 R expression string
 }
 \description{
-Translates SPSS syntax expressions (operators, functions, variable names)
 to equivalent R expressions.
 }
 \examples{

@@ -62,10 +62,28 @@ test_that("Full pipeline works on testdata (normality experiment)", {
   rmd_content <- readLines(rmd_result$rmd_path, warn = FALSE)
   rmd_text <- paste(rmd_content, collapse = "\n")
 
+  # The data-leak guards below scan only the document's *renderable* content.
+  # generate_rmd() injects a hidden `s2r-helpers` setup chunk (include=FALSE,
+  # so knitr never emits it or its output into the rendered HTML) whose body is
+  # the table-rendering helpers deparse()'d verbatim. That source legitimately
+  # contains the literal token "character(0)" (`... else character(0)`), which
+  # is intentional R code, not a leaked empty vector. Strip that hidden chunk
+  # before scanning so the guards still catch a genuine character(0)/NULL leak
+  # anywhere a value is actually printed into the report.
+  helper_start <- grep("^```\\{r s2r-helpers[,}]", rmd_content)
+  if (length(helper_start) == 1L) {
+    fences <- grep("^```", rmd_content)
+    helper_end <- fences[fences > helper_start][1]
+    scan_content <- rmd_content[-(helper_start:helper_end)]
+  } else {
+    scan_content <- rmd_content
+  }
+  scan_text <- paste(scan_content, collapse = "\n")
+
   # Should not contain character(0) or NULL leaks
-  expect_false(grepl("character\\(0\\)", rmd_text),
+  expect_false(grepl("character\\(0\\)", scan_text),
                info = "RMD contains character(0)")
-  expect_false(any(grepl("^NULL$", rmd_content)),
+  expect_false(any(grepl("^NULL$", scan_content)),
                info = "RMD contains bare NULL")
 
   # Should have YAML header

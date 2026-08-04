@@ -25,26 +25,37 @@ parse_sav <- function(sav_path) {
   # Read SPSS data file with all metadata preserved
   data <- haven::read_sav(sav_path, user_na = TRUE)
 
-  # Extract variable metadata
-  var_info <- data.frame(
-    name = names(data),
-    label = sapply(data, function(x) {
-      lbl <- attr(x, "label")
-      if (is.null(lbl)) "" else lbl
-    }),
-    type = sapply(data, function(x) {
-      if (haven::is.labelled(x)) {
-        "labelled"
-      } else {
-        class(x)[1]
-      }
-    }),
-    format = sapply(data, function(x) {
-      fmt <- attr(x, "format.spss")
-      if (is.null(fmt)) "" else fmt
-    }),
-    n_missing = sapply(data, function(x) sum(is.na(x))),
-    stringsAsFactors = FALSE
+  # Extract variable metadata (with safe extraction for unusual SAV files)
+  var_names <- names(data)
+  n_vars <- length(var_names)
+  var_info <- tryCatch(
+    data.frame(
+      name = var_names,
+      label = vapply(data, function(x) {
+        lbl <- attr(x, "label")
+        if (is.null(lbl) || length(lbl) != 1) "" else as.character(lbl)
+      }, character(1)),
+      type = vapply(data, function(x) {
+        if (haven::is.labelled(x)) "labelled" else class(x)[1]
+      }, character(1)),
+      format = vapply(data, function(x) {
+        fmt <- attr(x, "format.spss")
+        if (is.null(fmt) || length(fmt) != 1) "" else as.character(fmt)
+      }, character(1)),
+      n_missing = vapply(data, function(x) sum(is.na(x)), numeric(1)),
+      stringsAsFactors = FALSE
+    ),
+    error = function(e) {
+      # Fallback: minimal metadata if attribute extraction fails
+      data.frame(
+        name = var_names,
+        label = rep("", n_vars),
+        type = vapply(data, function(x) class(x)[1], character(1)),
+        format = rep("", n_vars),
+        n_missing = rep(0L, n_vars),
+        stringsAsFactors = FALSE
+      )
+    }
   )
 
   # Extract value labels for each variable

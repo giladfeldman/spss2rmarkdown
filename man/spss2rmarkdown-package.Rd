@@ -19,5 +19,10 @@ Useful links:
 \author{
 \strong{Maintainer}: Gilad Feldman \email{giladfel@gmail.com} (\href{https://orcid.org/0000-0003-2990-8997}{ORCID})
 
+Authors:
+\itemize{
+  \item Gilad Feldman \email{giladfel@gmail.com} (\href{https://orcid.org/0000-0003-2990-8997}{ORCID})
+}
+
 }
 \keyword{internal}

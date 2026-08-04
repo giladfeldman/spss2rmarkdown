@@ -158,6 +158,61 @@ test_that("EXEC abbreviation maps to EXECUTE", {
   expect_equal(cmd$command_type, "EXECUTE")
 })
 
+# --- 3-letter command abbreviations (SPSS accepts these everywhere) ----------
+# Round-3 OSF corpus uses DES/FRE/EXE/SEL IF/VAL LAB/VAR LAB heavily; without
+# these the procedures fell through to UNSUPPORTED and produced no output.
+
+test_that("DES abbreviation maps to DESCRIPTIVES", {
+  cmd <- parse_one("DES TV_exposure total_TV gap.\n")
+  expect_equal(cmd$command_type, "DESCRIPTIVES")
+  expect_equal(cmd$variables$all, c("TV_exposure", "total_TV", "gap"))
+})
+
+test_that("FRE abbreviation maps to FREQUENCIES", {
+  cmd <- parse_one("FRE a b c.\n")
+  expect_equal(cmd$command_type, "FREQUENCIES")
+  # trailing "." must not cling to the last variable
+  expect_equal(cmd$variables$all, c("a", "b", "c"))
+})
+
+test_that("EXE abbreviation maps to EXECUTE", {
+  cmd <- parse_one("exe.\n")
+  expect_equal(cmd$command_type, "EXECUTE")
+})
+
+test_that("REL abbreviation maps to RELIABILITY", {
+  cmd <- parse_one("REL /VARIABLES=a b c /MODEL=ALPHA.\n")
+  expect_equal(cmd$command_type, "RELIABILITY")
+})
+
+test_that("EXA abbreviation maps to EXAMINE", {
+  cmd <- parse_one("EXA VARIABLES=x /PLOT BOXPLOT.\n")
+  expect_equal(cmd$command_type, "EXAMINE")
+})
+
+test_that("SEL IF abbreviation maps to SELECT IF", {
+  cmd <- parse_one("sel if mv_outlier=0.\n")
+  expect_equal(cmd$command_type, "SELECT IF")
+})
+
+test_that("VAR LAB abbreviation maps to VARIABLE LABELS", {
+  cmd <- parse_one("VAR LAB Morning 'Morning total'.\n")
+  expect_equal(cmd$command_type, "VARIABLE LABELS")
+})
+
+test_that("VAL LAB abbreviation maps to VALUE LABELS", {
+  cmd <- parse_one("VAL LAB Morning 1 'a' 2 'b'.\n")
+  expect_equal(cmd$command_type, "VALUE LABELS")
+})
+
+test_that("full command names are unaffected by abbreviation aliases", {
+  # Guard: the short aliases must not shadow longer commands sharing a prefix.
+  expect_equal(parse_one("DATASET NAME d3 WINDOW=FRONT.\n")$command_type, "DATASET")
+  expect_equal(parse_one("EXECUTE.\n")$command_type, "EXECUTE")
+  expect_equal(parse_one("DELETE VARIABLES x y.\n")$command_type, "DELETE VARIABLES")
+  expect_equal(parse_one("VARSTOCASES /MAKE x FROM a b.\n")$command_type, "VARSTOCASES")
+})
+
 test_that("VARIABLE LABELS is recognized", {
   cmd <- parse_one("VARIABLE LABELS var1 'My Variable'.\n")
   expect_equal(cmd$command_type, "VARIABLE LABELS")

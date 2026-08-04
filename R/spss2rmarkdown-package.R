@@ -6,6 +6,6 @@
 #' @importFrom dplyr group_by summarise n
 #' @importFrom stringr str_detect str_extract str_replace str_replace_all str_trim
 #' @importFrom stats na.omit quantile median sd cor qt
-#' @importFrom utils write.csv
+#' @importFrom utils write.csv modifyList
 #' @importFrom jsonlite toJSON fromJSON
 NULL

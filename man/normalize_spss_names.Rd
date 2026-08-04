@@ -13,5 +13,15 @@ normalize_spss_names(x)
 Normalized variable names
 }
 \description{
-Normalize SPSS variable names to R-safe uppercase names
+ASCII punctuation (spaces, parens, hyphens, ...) collapses to "." as before.
+NON-ASCII letters (Hebrew/Cyrillic/accented, common in international .sav
+files) are mapped to a deterministic per-codepoint token "\emph{UXXXX}" instead of
+a bare "." — otherwise distinct names that differ ONLY by a non-ASCII letter
+(e.g. Hebrew \verb{TV<aleph>1} / \verb{TV<bet>1} / \verb{TV<gimel>1}) would all collapse to
+the same \code{TV.1}, producing DUPLICATE column names. dplyr then aborts every
+downstream transform with "Can't transform a data frame with duplicate
+names", silently failing the whole report. The token keeps the mapping
+injective AND identical whether applied to a .sav's columns (at render time)
+or to a syntax variable reference (at conversion time), so the two stay
+consistent. ASCII-only names are unaffected.
 }

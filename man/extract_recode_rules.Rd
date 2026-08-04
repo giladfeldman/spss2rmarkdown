@@ -2,14 +2,17 @@
 % Please edit documentation in R/syntax_converter.R
 \name{extract_recode_rules}
 \alias{extract_recode_rules}
-\title{Extract recode rules from RECODE command}
+\title{Extract recode rules from a RECODE command}
 \usage{
 extract_recode_rules(cmd)
 }
 \arguments{
-\item{cmd}{Character string of SPSS command text}
+\item{cmd}{Character string of SPSS command text.}
+}
+\value{
+List of \code{list(old = , new = )} rule pairs.
 }
 \description{
-Extract recode rules from RECODE command
+Extract recode rules from a RECODE command
 }
 \keyword{internal}

@@ -4,12 +4,20 @@
 \alias{convert_all_commands}
 \title{Convert all parsed commands to R code}
 \usage{
-convert_all_commands(parsed_commands, sav_info)
+convert_all_commands(parsed_commands, sav_info, all_var_names = NULL)
 }
 \arguments{
 \item{parsed_commands}{List of parsed commands from \code{\link[=parse_sps]{parse_sps()}}}
 
 \item{sav_info}{SAV file info from \code{\link[=parse_sav]{parse_sav()}}}
+
+\item{all_var_names}{Optional character vector of variable names to use when
+expanding SPSS variable ranges (\verb{var1 TO var10}). When a \code{.sps} is paired
+with MULTIPLE \code{.sav} files, the referenced variables may live in a
+non-primary dataset, so the caller can pass the UNION of variable names
+across all paired \code{.sav} files here. When \code{NULL} (default), the names are
+taken from \code{sav_info} (the loaded primary dataset) for backward
+compatibility.}
 }
 \value{
 List of conversion results, each containing r_code, packages, and analysis_type
