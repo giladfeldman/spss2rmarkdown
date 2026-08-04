@@ -1246,24 +1246,42 @@ convert_factor <- function(parsed, sav_info) {
   }
   vars_str <- make_vars_str(vars)
 
+  # Engine: psych, NOT jmv::efa.
+  #
+  # jmv::efa is non-deterministically broken in the worker environment: the
+  # byte-identical call in fresh isolated R processes failed 8/8 in one batch
+  # with "'names' attribute [N] must be the same length as the vector [0]" and
+  # succeeded 4/4 in another. It is not data-determined — missing variables,
+  # full-frame vs subset, haven_labelled columns, and CPU contention were each
+  # tested and refuted. psych is already a declared dependency, is
+  # deterministic, and reproduces SPSS EXACTLY (verified 2026-08-04 against
+  # SPSS ground truth on Driver_Data.sav: KMO .833, Bartlett chi-square
+  # 905.322 df 28, and all 8 communalities identical to 3 dp — see
+  # tests/testthat/test-factor-psych-engine.R).
+  #
+  # SPSS FACTOR defaults mirrored here: /MISSING PAIRWISE -> pairwise
+  # correlations; /CRITERIA MINEIGEN(1) -> retain eigenvalue > 1;
+  # /EXTRACTION PC -> principal components; /ROTATION VARIMAX.
   r_code <- glue::glue('
-jmv::efa(
-  data = data,
-  vars = {vars_str},
-  nFactorMethod = "parallel",
-  extraction = "pa",
-  rotation = "varimax",
-  hideLoadings = 0.3,
-  sortLoadings = TRUE,
-  screePlot = TRUE,
-  eigen = TRUE,
-  factorCor = TRUE,
-  factorSummary = TRUE,
-  kmo = TRUE,
-  bartlett = TRUE
-)')
+local({{
+  .vars <- {vars_str}
+  .x <- as.data.frame(lapply(data[, .vars, drop = FALSE], as.numeric))
+  .R <- stats::cor(.x, use = "pairwise.complete.obs")
+  .n <- sum(stats::complete.cases(.x))
+  .nf <- max(1L, sum(eigen(.R)$values > 1))
+  .pc <- psych::principal(.R, nfactors = .nf, rotate = "varimax")
+  list(
+    kmo          = psych::KMO(.R),
+    bartlett     = psych::cortest.bartlett(.R, n = .n),
+    n            = .n,
+    nfactors     = .nf,
+    communality  = .pc$communality,
+    loadings     = unclass(.pc$loadings),
+    eigenvalues  = eigen(.R)$values
+  )
+}})')
 
-  list(r_code = r_code, packages = "jmv",
+  list(r_code = r_code, packages = "psych",
        analysis_type = "Factor Analysis", variables = vars)
 }
 

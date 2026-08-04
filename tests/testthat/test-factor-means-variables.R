@@ -47,12 +47,18 @@ test_that("FACTOR /ANALYSIS is not double-counted into all", {
   expect_equal(r$all, c("a1", "a2"))
 })
 
-test_that("convert_factor emits a real jmv::efa call, never a comment stub", {
+test_that("convert_factor emits a real analysis call, never a comment stub", {
+  # Engine-agnostic on purpose: this test pins the INVARIANT (a real factor
+  # analysis is emitted for a well-formed FACTOR command), not the mechanism.
+  # The engine moved from jmv::efa to psych on 2026-08-04 because jmv::efa is
+  # non-deterministic in the worker environment; see test-factor-psych-engine.R,
+  # which owns the engine choice and the ground-truth numbers.
   psc <- getFromNamespace("parse_single_command", "spss2rmarkdown")
   cf  <- getFromNamespace("convert_factor", "spss2rmarkdown")
   p <- psc("FACTOR\n/VARIABLES a1 a2 a3\n/EXTRACTION PC\n/ROTATION VARIMAX")
   out <- cf(p, NULL)
-  expect_true(grepl("jmv::efa", out$r_code, fixed = TRUE))
+  expect_match(out$r_code, "psych::|jmv::efa")
+  expect_true(grepl("a1", out$r_code, fixed = TRUE))
   expect_false(grepl("No variables specified", out$r_code, fixed = TRUE))
   # The generated code must be a parseable EXPRESSION, since the emitter wraps
   # it as `.res <- <r_code>`. A comment-only body silently yields no binding.

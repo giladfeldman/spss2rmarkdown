@@ -128,11 +128,46 @@ s2r_render_model <- function(model) {
   paste0(code, "\n  NULL")
 }
 
+# Render an analysis-chunk error into a single, always-non-empty report line.
+#
+# The old handler did `cat("**Analysis error:**", e$message, "\n")`, which
+# produced a BLANK error line for real, diagnosable failures: rlang/vctrs
+# conditions carry multi-line UTF-8 messages, and conditionMessage() on some
+# condition objects returns character(0), so cat() contributed nothing. A user
+# then saw "Analysis error:" with no reason at all — worse than a verbose
+# message, because there is nothing to act on and the defect looks like a
+# harness artifact rather than a data problem.
+#
+# Observed on round-3-spss "Syntax_ Exploring factor analysis…", where the
+# swallowed message was the actual diagnosis: "Can't subset columns that don't
+# exist. Columns `PASTI00`, `PAMA02`, … don't exist."
+#
+# This is a RENDER-time helper, so it is deparsed into the generated .Rmd by
+# .s2r_helpers_chunk() below and must stay dependency-free.
+.s2r_format_error <- function(e) {
+  msg <- tryCatch(conditionMessage(e), error = function(...) NULL)
+  if (is.null(msg) || !length(msg)) msg <- tryCatch(e$message, error = function(...) NULL)
+  msg <- tryCatch(as.character(msg), error = function(...) character(0))
+  msg <- msg[!is.na(msg)]
+  msg <- paste(msg, collapse = " ")
+  # Flatten newlines so the message stays on one report line, and collapse the
+  # runs of whitespace that flattening leaves behind.
+  msg <- gsub("[\r\n]+", " ", msg)
+  msg <- gsub("[[:space:]]+", " ", msg)
+  msg <- trimws(msg)
+  if (!nzchar(msg)) {
+    cls <- tryCatch(paste(class(e), collapse = "/"), error = function(...) "condition")
+    msg <- paste0("(no message; condition class: ", cls, ")")
+  }
+  msg
+}
+
 # Build the hidden setup chunk that defines the helpers inside the generated
 # .Rmd, via deparse() of the live functions (no escaping, no file dependency).
 .s2r_helpers_chunk <- function() {
   defs <- vapply(
-    c(".s2r_table_to_html", "s2r_render_tables", "s2r_render_model"),
+    c(".s2r_table_to_html", "s2r_render_tables", "s2r_render_model",
+      ".s2r_format_error"),
     function(nm) paste0(nm, " <- ", paste(deparse(get(nm)), collapse = "\n")),
     character(1)
   )
@@ -542,7 +577,7 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
         "tryCatch({\n",
         conv$r_code,
         "\n}, error = function(e) {\n",
-        "  cat(\"**Transformation ", i, " failed:**\", e$message, \"\\n\")\n",
+        "  cat(\"**Transformation ", i, " failed:**\", .s2r_format_error(e), \"\\n\")\n",
         "})\n"
       )
     }, character(1))
@@ -645,7 +680,7 @@ tryCatch({{
   .res <- {res_rhs}
   s2r_render_tables(.res)
 }}, error = function(e) {{
-  cat("\\n\\n**Analysis error:**", e$message, "\\n\\n")
+  cat("\\n\\n**Analysis error:**", .s2r_format_error(e), "\\n\\n")
 }})
 ```
 ')
