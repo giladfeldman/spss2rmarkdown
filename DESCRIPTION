@@ -20,6 +20,7 @@ Imports:
 Suggests:
     rmarkdown (>= 2.20),
     jmv,
+    withr,
     olsrr,
     lubridate,
     tidyr,
