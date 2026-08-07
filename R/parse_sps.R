@@ -82,10 +82,10 @@ parse_sps <- function(sps_path) {
 #' canonical (full) name is sometimes recoverable from the syntax itself
 #' through:
 #'
-#'   * `RECODE old INTO new` — both names appear together,
-#'   * `VARIABLE LABELS varname 'Long form'` — a label hints at the full name
+#'   * `RECODE old INTO new` -- both names appear together,
+#'   * `VARIABLE LABELS varname 'Long form'` -- a label hints at the full name
 #'     (we record the literal varname rather than guessing),
-#'   * `RENAME VARIABLES (old=new)` — explicit rename pair.
+#'   * `RENAME VARIABLES (old=new)` -- explicit rename pair.
 #'
 #' We collect every name that appears in the script and return a unique,
 #' upper-cased character vector. Downstream code uses [resolve_truncated_name]
@@ -111,11 +111,11 @@ build_alias_map <- function(parsed) {
                      cmd$variables$target_vars %||% character())
     }
 
-    # COMPUTE newvar = expr — record both the target and any identifier tokens
+    # COMPUTE newvar = expr -- record both the target and any identifier tokens
     # that appear in the right-hand expression. The expression often references
     # source variables that may be 8-char-truncated or never appear elsewhere
     # in the script. We use a permissive identifier regex (letters, digits,
-    # underscore, dot — matching SPSS naming) and discard SPSS function names
+    # underscore, dot -- matching SPSS naming) and discard SPSS function names
     # the user never declares (MEAN, SUM, SQRT, etc.).
     if (identical(ct, "COMPUTE")) {
       tgt <- cmd$variables$target %||% character()
@@ -138,13 +138,13 @@ build_alias_map <- function(parsed) {
       }
     }
 
-    # IF (cond) target = expr — same treatment as COMPUTE for target/expression
+    # IF (cond) target = expr -- same treatment as COMPUTE for target/expression
     if (identical(ct, "IF")) {
       tgt <- cmd$variables$target %||% character()
       collected <- c(collected, tgt)
     }
 
-    # RENAME VARIABLES (old=new) — parse from raw if present
+    # RENAME VARIABLES (old=new) -- parse from raw if present
     if (identical(ct, "RENAME VARIABLES")) {
       pairs <- regmatches(cmd$raw,
         gregexpr("\\(\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*=\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*\\)",
@@ -157,7 +157,7 @@ build_alias_map <- function(parsed) {
       }
     }
 
-    # VARIABLE LABELS varname 'Long' — record the varname (a short alias
+    # VARIABLE LABELS varname 'Long' -- record the varname (a short alias
     # candidate). VARIABLE LABELS is a SKIP_COMMAND for conversion but we still
     # see the parsed object here.
     if (identical(ct, "VARIABLE LABELS")) {
@@ -192,7 +192,7 @@ build_alias_map <- function(parsed) {
 #' `ADDRESS_FULL`). When a referenced name does not exist in the .sav
 #' variable list, we try to recover the canonical form by:
 #'
-#'   1. Exact (case-insensitive) match in `sav_vars` — return it.
+#'   1. Exact (case-insensitive) match in `sav_vars` -- return it.
 #'   2. 8-char prefix match: find names in `sav_vars` whose first 8
 #'      characters match the queried name's first 8 characters. If
 #'      exactly one match, return it. (Multiple matches: ambiguous,
@@ -232,7 +232,7 @@ resolve_truncated_name <- function(name, sav_vars, alias_map = character()) {
     # If ambiguous, fall through to alias_map / unchanged.
   }
 
-  # 3. Alias map fallback (informational only — only useful if alias_map
+  # 3. Alias map fallback (informational only -- only useful if alias_map
   #    happens to contain a longer form that matches a sav variable)
   if (length(alias_map) > 0 && nchar(name_u) == 8L) {
     alias_u <- toupper(alias_map)
@@ -276,7 +276,7 @@ annotate_filter_state <- function(parsed) {
   # captured from `COMPUTE <var> = <expr>` / `IF (..) <var> = <expr>`. SPSS's
   # `COMPUTE filter_$ = (cond)` + `FILTER BY filter_$` pattern computes the filter
   # column once, but our generated per-analysis filter runs on a freshly-loaded
-  # data frame where that column was never computed — so we must re-emit the
+  # data frame where that column was never computed -- so we must re-emit the
   # COMPUTE inside each filtered analysis. Stashing the defining expression here
   # lets the converter do that. (Case-insensitive keys: SPSS names are.)
   var_defs <- list()
@@ -321,7 +321,7 @@ annotate_filter_state <- function(parsed) {
         filter_state <- cmd$variables$filter_var
         filter_expr  <- var_defs[[toupper(filter_state)]] %||% NULL
       }
-      # FILTER commands themselves never carry filter_var — they only set state.
+      # FILTER commands themselves never carry filter_var -- they only set state.
       cmd$filter_var  <- NULL
       cmd$filter_expr <- NULL
     } else if (identical(ct, "USE ALL")) {
@@ -364,7 +364,7 @@ remove_comments <- function(syntax) {
   # command that follows it, and still protect genuine `*`-as-operator
   # continuation lines.
   #
-  # Each comment line is treated as self-contained — we blank that single line
+  # Each comment line is treated as self-contained -- we blank that single line
   # only (the original well-tested behavior). We do NOT swallow following lines
   # up to a `.`: a bare `*comment` here is followed by the next command, not by
   # comment continuation text, and consuming to the next period would eat that
@@ -595,7 +595,7 @@ extract_command_type <- function(cmd) {
     # Boundary after the keyword: a negative lookahead for a word character.
     # This treats whitespace, EOL, the "." command terminator (e.g. "EXE." /
     # "EXECUTE."), AND the value delimiters that immediately follow a keyword in
-    # real SPSS (`=`, `(`, `/`, quotes) all as boundaries — so
+    # real SPSS (`=`, `(`, `/`, quotes) all as boundaries -- so
     # `GET FILE='data.sav'` matches `GET\s+FILE` even though `=` (not a space)
     # follows `FILE`. The old `(\\s|\\.|$)` required whitespace/period/EOL and so
     # missed `FILE=` / `GET DATA/...`, mis-typing the command. perl=TRUE for the
@@ -737,6 +737,11 @@ extract_variables <- function(cmd, command_type) {
 
   } else if (command_type == "T-TEST") {
     result$groups <- extract_pattern(cmd, "GROUPS\\s*=\\s*([^(/]+)")
+    # The parenthesised value list after the grouping variable -- SPSS
+    # `GROUPS=g(v1 v2)` compares cases with g==v1 against g==v2 (in that
+    # order); `GROUPS=g(v)` is a cut point (>= v vs < v). Captured raw here;
+    # convert_ttest() interprets it.
+    result$group_values <- extract_pattern(cmd, "GROUPS\\s*=\\s*[^(/]+\\(([^)]*)\\)")
     result$variables <- extract_variables_clause(cmd)
     pairs_clause <- extract_pattern(cmd, "PAIRS\\s*=\\s*([^/]+)")
     result$pairs <- pairs_clause
@@ -795,7 +800,7 @@ extract_variables <- function(cmd, command_type) {
     # Work off the command up to the first "/" subcommand (and only the first
     # line's worth of "<dvs> BY <factor>") so multi-line /CONTRAST specs are not
     # swallowed. NOTE: `\w`/`\s` are NOT valid inside a bracket expression in R's
-    # default (TRE) regex — `[\\w\\s,]` there matches the literal characters
+    # default (TRE) regex -- `[\\w\\s,]` there matches the literal characters
     # \\, w, s, comma, so the previous pattern never matched a real DV name and
     # ONEWAY silently produced an empty var list (-> a broken `.res <- # ONEWAY:
     # Missing DV or factor` stub and an "object '.res' not found" cascade). Use
@@ -842,7 +847,7 @@ extract_variables <- function(cmd, command_type) {
     }
     # Capture factors after BY up to next "/" or " WITH " or end-of-string.
     # Prior regex used [^/WITH] which (with ignore.case) excluded individual
-    # letters W/I/T/H — silently truncating any factor name containing them.
+    # letters W/I/T/H -- silently truncating any factor name containing them.
     by_match <- regmatches(cmd, regexec(
       "BY\\s+(.+?)(?:\\s+WITH\\s|\\s*/|$)",
       cmd, ignore.case = TRUE))[[1]]
@@ -1172,7 +1177,7 @@ extract_variables <- function(cmd, command_type) {
     # FACTOR /VARIABLES v1 v2 ... [/ANALYSIS ...] [/EXTRACTION ...] ...
     # Same defect shape as EXAMINE above: FACTOR previously had no branch, so
     # `all` stayed empty for EVERY syntax form and convert_factor() emitted
-    # "# FACTOR: No variables specified" as the RHS of `.res <- <r_code>` —
+    # "# FACTOR: No variables specified" as the RHS of `.res <- <r_code>` --
     # a comment is not an expression, so `.res` was never bound and the
     # following s2r_render_tables(.res) raised "object '.res' not found".
     # /ANALYSIS names a subset of /VARIABLES for the extraction; it never

@@ -148,3 +148,79 @@ test_that("expand_spss_variables flags a genuinely unresolvable range", {
   expect_true(isTRUE(out$.unresolved_to))
   expect_equal(out$.unresolved_to_ranges, "alpha TO omega")
 })
+
+# --- REGRESSION /METHOD blocks: TO ranges must expand there too --------------
+# Regression test for a defect found 2026-08-06 (flagged by Codex as an
+# unexplained error, root-caused by Sonnet, reproduced locally before fixing).
+#
+# REGRESSION stores its per-/METHOD predictor lists at
+# $variables$method_blocks as a LIST of character vectors. expand_spss_variables()
+# only expanded elements for which is.character(x) was TRUE, so a list was
+# skipped entirely: `/METHOD=ENTER session1 to session9` reached
+# make_regression_code() as the literal tokens c("session1","to","session9") and
+# was emitted into jmv::linReg(blocks = ...) verbatim. jmv then failed with an
+# opaque "object 'XVE8' not found", while SPSS itself expands the range and
+# reports a complete Model Summary/ANOVA/Coefficients for all nine predictors
+# (round-1 GT fw-performance-syntax-final.txt line 975 lists session1..session9).
+#
+# The literal "TO" must never survive into a method block.
+
+test_that("expand_spss_variables expands TO ranges inside $variables$method_blocks", {
+  cmd <- list(
+    command_type = "REGRESSION",
+    variables = list(
+      all = c("PERF", "SESSION1", "TO", "SESSION9"),
+      method_blocks = list(
+        c("SESSION1", "TO", "SESSION9"),
+        c("AGE_BL", "GENDER_BL")
+      )
+    )
+  )
+  out <- expand_spss_variables(cmd, sav_info = list(metadata = list(name = NULL)))
+
+  expect_equal(out$variables$method_blocks[[1]],
+               c("SESSION1", "SESSION2", "SESSION3", "SESSION4", "SESSION5",
+                 "SESSION6", "SESSION7", "SESSION8", "SESSION9"))
+  # A block with no range must pass through untouched.
+  expect_equal(out$variables$method_blocks[[2]], c("AGE_BL", "GENDER_BL"))
+  # No literal TO may survive in ANY block.
+  expect_false(any(vapply(out$variables$method_blocks,
+                          function(b) any(toupper(b) == "TO"), logical(1))))
+})
+
+test_that("method_blocks expand against the dataset dictionary", {
+  cmd <- list(
+    command_type = "REGRESSION",
+    variables = list(method_blocks = list(c("item1", "TO", "item3")))
+  )
+  out <- expand_spss_variables(cmd, sav_info = list(metadata = list(name = c("AGE"))),
+                               all_var_names = c("AGE", "ITEM1", "ITEM2", "ITEM3"))
+  expect_equal(out$variables$method_blocks[[1]], c("ITEM1", "ITEM2", "ITEM3"))
+})
+
+test_that("an unresolvable range inside method_blocks is flagged, not passed to jmv", {
+  cmd <- list(
+    command_type = "REGRESSION",
+    variables = list(method_blocks = list(c("alpha", "TO", "omega")))
+  )
+  out <- expand_spss_variables(cmd, sav_info = list(metadata = list(name = NULL)))
+  expect_true(isTRUE(out$.unresolved_to))
+  expect_equal(out$.unresolved_to_ranges, "alpha TO omega")
+})
+
+test_that("end-to-end: a parsed REGRESSION TO-range reaches method_blocks expanded", {
+  # Guards the SEAM, not just the helper: parse a real command, run the same
+  # expansion the converter runs, and assert the literal token is gone. This is
+  # the check that would have caught the original defect (the helper's own unit
+  # tests passed while the pipeline was untouched).
+  cmd <- paste("REGRESSION /MISSING LISTWISE /DEPENDENT perf",
+               "/METHOD=ENTER session1 to session9 /METHOD=ENTER age_bl gender_bl.")
+  p <- parse_single_command(cmd)
+  expect_equal(p$variables$method_blocks[[1]], c("session1", "to", "session9"))
+
+  out <- expand_spss_variables(p, sav_info = list(metadata = list(name = NULL)))
+  expect_equal(out$variables$method_blocks[[1]],
+               c("session1", "session2", "session3", "session4", "session5",
+                 "session6", "session7", "session8", "session9"))
+  expect_false(any(toupper(out$variables$method_blocks[[1]]) == "TO"))
+})

@@ -1,3 +1,43 @@
+# spss2rmarkdown 0.3.0
+
+Twelve commits of fixes since 0.2.0 (2026-08-04). Several changed *values* or
+suppressed output entirely rather than raising an error, so any script using the
+affected commands should be re-run.
+
+## Numeric correctness
+
+* **`TO` ranges inside `REGRESSION /METHOD` blocks are expanded.** REGRESSION
+  stores its per-`/METHOD` predictor lists as a *list* of character vectors, and
+  the expander only handled bare character vectors — so `/METHOD=ENTER session1
+  to session9` reached `jmv::linReg(blocks = ...)` with the literal token `to`
+  still in it. jmv then died with an opaque "object not found" and the entire
+  hierarchical regression rendered **no statistics at all**, while SPSS reports
+  the full model. The unresolved-range guard missed it for the same reason.
+* **`RELIABILITY` no longer fabricates McDonald's omega.** SPSS `MODEL=ALPHA`
+  does not compute omega; a value was being emitted anyway.
+* **T-TEST `GROUPS=g(v1 v2)` semantics.** The listed values were not used to
+  subset (a hard error on any group variable with more than two levels), their
+  order was ignored (a sign-flip risk), and every dependent variable after the
+  first was dropped.
+* **Multi-`.sav` pairing is resolved by variable coverage**, not by filename
+  order. Uploads without an explicit `GET FILE` were auto-paired with the
+  alphabetically first `.sav`, which silently analysed the wrong dataset.
+* `FACTOR` is converted with `psych` instead of the non-deterministic
+  `jmv::efa`, which returned different loadings across runs.
+* `COUNT` criteria are parsed as term *lists*, handling `MISSING`, mixed forms,
+  and `THRU` ranges; previously these emitted invalid R.
+* `FACTOR` / `MEANS` variable extraction fixed; comment-only stubs guarded.
+
+## Robustness
+
+* Analysis and transformation errors **never render blank** — a failed command
+  now shows what failed instead of producing an empty section.
+* `$CASENUM` translates to `dplyr::row_number()`, and is flagged as unsafe when
+  a `SELECT IF` / `FILTER` / `SORT CASES` / `SPLIT FILE` precedes it, since the
+  equivalence only holds without those.
+* Documentation and dependency declarations corrected (`utils::modifyList`
+  declared, `olsrr` moved to Suggests, roxygen blocks repaired).
+
 # spss2rmarkdown (development)
 
 * `$CASENUM`, SPSS's per-case sequential row number, translates to

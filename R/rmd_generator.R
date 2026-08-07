@@ -108,7 +108,7 @@ s2r_render_model <- function(model) {
 # their variables (e.g. "# FACTOR: No variables specified"). Substituted into
 # the analysis-chunk template that becomes `.res <- # FACTOR: ...`, a comment
 # is not an expression: `.res` is never bound and the following
-# `s2r_render_tables(.res)` raises "object '.res' not found" — a hard,
+# `s2r_render_tables(.res)` raises "object '.res' not found" -- a hard,
 # user-visible "Analysis error" where a silent skip was intended.
 #
 # Appending an explicit `NULL` line keeps such a stub a parseable no-op
@@ -120,7 +120,7 @@ s2r_render_model <- function(model) {
 .s2r_expression_safe_rcode <- function(r_code) {
   code <- paste(as.character(r_code), collapse = "\n")
   # Does the code parse to at least one expression on its own? Comments and
-  # whitespace parse cleanly but yield zero expressions — exactly the stub case.
+  # whitespace parse cleanly but yield zero expressions -- exactly the stub case.
   parsed <- tryCatch(parse(text = code), error = function(e) NULL)
   if (!is.null(parsed) && length(parsed) > 0) {
     return(code)
@@ -134,13 +134,13 @@ s2r_render_model <- function(model) {
 # produced a BLANK error line for real, diagnosable failures: rlang/vctrs
 # conditions carry multi-line UTF-8 messages, and conditionMessage() on some
 # condition objects returns character(0), so cat() contributed nothing. A user
-# then saw "Analysis error:" with no reason at all — worse than a verbose
+# then saw "Analysis error:" with no reason at all -- worse than a verbose
 # message, because there is nothing to act on and the defect looks like a
 # harness artifact rather than a data problem.
 #
-# Observed on round-3-spss "Syntax_ Exploring factor analysis…", where the
+# Observed on round-3-spss "Syntax_ Exploring factor analysis...", where the
 # swallowed message was the actual diagnosis: "Can't subset columns that don't
-# exist. Columns `PASTI00`, `PAMA02`, … don't exist."
+# exist. Columns `PASTI00`, `PAMA02`, ... don't exist."
 #
 # This is a RENDER-time helper, so it is deparsed into the generated .Rmd by
 # .s2r_helpers_chunk() below and must stay dependency-free.
@@ -341,11 +341,11 @@ data <- NULL
   # fail ("Argument 'vars' contains 'AGE' which is not present in the data").
   # When secondary .sav files are present, emit self-contained code that reads
   # each, normalizes its names, and column-binds its NEW columns onto the
-  # primary — only when the row counts match (per-subject alignment). Shared
+  # primary -- only when the row counts match (per-subject alignment). Shared
   # columns (e.g. GROUP) are NOT overwritten; the primary wins. A row-count
   # mismatch is skipped with a note (a positional cbind would misalign rows).
   #
-  # R-0047: equal row counts are NOT proof of alignment — two files with the
+  # R-0047: equal row counts are NOT proof of alignment -- two files with the
   # SAME N but a different sort order pass the row-count gate and get
   # positionally cbind-ed anyway, silently misjoining every row. Before
   # binding, look for a shared ID-like variable (case-insensitive match on a
@@ -661,7 +661,7 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
     # The chunk template substitutes r_code as the RHS of `.res <- <r_code>`.
     # A converter that degrades to a comment-only stub (e.g.
     # "# FACTOR: No variables specified") therefore emits
-    # `.res <- # FACTOR: ...` — a comment is not an expression, so `.res` is
+    # `.res <- # FACTOR: ...` -- a comment is not an expression, so `.res` is
     # never bound and the next line raises "object '.res' not found", turning
     # an intended graceful skip into a hard user-visible Analysis error.
     # Append an explicit NULL so any comment-only stub stays a parseable no-op.
@@ -706,8 +706,24 @@ The following SPSS commands were not automatically converted and may need manual
   }
 
   # ---- Conversion notes (dynamic, from path resolution) ----
-  dynamic_notes_section <- if (length(conversion_notes) > 0) {
-    rows <- vapply(conversion_notes, function(n) {
+  # The no-data guard text promises a "Conversion Notes" section with
+  # diagnostics. When the caller supplied no notes (the Layer-1 adapter, or a
+  # worker upload with no .sav at all), that promise used to dangle -- the
+  # section was skipped entirely, leaving a cross-reference to nonexistent
+  # content (caught by the 2026-08-04 Sonnet canary audit on Syntax_Hyp4).
+  # Synthesize the explanatory note so the referenced section always exists
+  # whenever the document points the reader at it.
+  effective_notes <- conversion_notes
+  if (!has_sav && length(effective_notes) == 0) {
+    effective_notes <- list(list(
+      level = "warning",
+      message = paste(
+        "No .sav data file was paired with this script, so no dataset could",
+        "be loaded and analytical commands were skipped. Upload the matching",
+        ".sav alongside the syntax to produce numeric results.")))
+  }
+  dynamic_notes_section <- if (length(effective_notes) > 0) {
+    rows <- vapply(effective_notes, function(n) {
       lvl <- if (is.list(n)) (n$level %||% "info") else "info"
       msg <- if (is.list(n)) (n$message %||% as.character(n)) else as.character(n)
       sprintf("| %s | %s |", lvl, gsub("\\|", "\\\\|", msg))

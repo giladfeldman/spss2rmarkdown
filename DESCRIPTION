@@ -1,6 +1,6 @@
 Package: spss2rmarkdown
 Title: Convert SPSS Syntax Files to Reproducible R Markdown Reports
-Version: 0.2.0
+Version: 0.3.0
 Authors@R: person("Gilad", "Feldman", email = "giladfel@gmail.com",
                   role = c("aut", "cre"), comment = c(ORCID = "0000-0003-2990-8997"))
 Description: Converts SPSS .sps syntax files and .sav data files into reproducible

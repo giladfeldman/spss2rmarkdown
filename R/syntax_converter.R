@@ -62,9 +62,9 @@ convert_all_commands <- function(parsed_commands, sav_info, all_var_names = NULL
 
   # Two SPSS sublanguages we cannot translate to dplyr/jmv R:
   #
-  # 1. MATRIX. ... END MATRIX. — matrix-algebra dialect with `!MAT`,
+  # 1. MATRIX. ... END MATRIX. -- matrix-algebra dialect with `!MAT`,
   #    slicing `(:,i)`, element-wise `&*` / `&/`, etc.
-  # 2. DEFINE !macro(args). ... !ENDDEFINE. — macro definitions whose body
+  # 2. DEFINE !macro(args). ... !ENDDEFINE. -- macro definitions whose body
   #    is SPSS-template syntax, often itself containing MATRIX. blocks.
   #
   # Trying to convert these as ordinary COMPUTE produces invalid R that
@@ -78,7 +78,7 @@ convert_all_commands <- function(parsed_commands, sav_info, all_var_names = NULL
     ct  <- toupper(trimws(unname(cmd$command_type) %||% ""))
     raw <- toupper(trimws(cmd$raw %||% ""))
 
-    # Boundary detection (look at command type AND raw text — parse_sps may
+    # Boundary detection (look at command type AND raw text -- parse_sps may
     # emit DEFINE / !ENDDEFINE as different command types depending on form).
     if (ct == "MATRIX") in_matrix_block <- TRUE
     if (ct == "DEFINE" || grepl("^DEFINE\\s+", raw) || grepl("^DEFINE\\s*!", raw)) {
@@ -273,7 +273,7 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
     fv <- normalize_spss_names(parsed_command$filter_var)
     indented <- paste0("  ", gsub("\n", "\n  ", result$r_code))
     # The filter column is created by an earlier `COMPUTE filter_$ = (cond)` whose
-    # mutate() lives in a *different* analysis's local() scope — so it does NOT
+    # mutate() lives in a *different* analysis's local() scope -- so it does NOT
     # exist on the freshly-loaded `data` here. Re-emit that COMPUTE inside this
     # block (when we captured its defining expression in annotate_filter_state)
     # so the filter has a column to act on. Fall back to a tolerant guard when no
@@ -533,28 +533,99 @@ convert_ttest <- function(parsed, sav_info) {
   pairs <- parsed$variables$pairs
 
   if (!is.null(groups) && length(groups) > 0) {
-    # Independent samples t-test
-    group_var <- gsub("\\(.*", "", groups[1])
-    dv <- vars[1] %||% pairs[1]
-    if (is.null(dv)) {
+    # Independent samples t-test. SPSS `T-TEST GROUPS=g(v1 v2)` compares the
+    # cases with g==v1 against those with g==v2 ONLY (other levels are
+    # excluded), with v1 as group 1 -- the listed order defines the sign of
+    # t and the mean difference. `GROUPS=g(v)` is a cut point: cases >= v
+    # form group 1, cases < v group 2. /VARIABLES may list SEVERAL DVs, each
+    # analysed. (All three semantics were dropped before 2026-08-04:
+    # >2-level groups hard-errored, sign flipped for descending value pairs,
+    # and only the first DV was analysed.)
+    group_var <- trimws(gsub("\\(.*", "", groups[1]))
+    dvs <- vars
+    if ((is.null(dvs) || length(dvs) == 0) && !is.null(pairs)) dvs <- pairs
+    if (is.null(dvs) || length(dvs) == 0) {
       return(list(r_code = "# T-TEST: No dependent variable found",
                   packages = character(), analysis_type = "T-Test"))
     }
+    vars_code <- paste0("c(", paste0('"', dvs, '"', collapse = ", "), ")")
 
-    r_code <- glue::glue('
-jmv::ttestIS(
-  data = data,
-  vars = c("{dv}"),
-  group = "{group_var}",
-  students = TRUE,
-  welchs = TRUE,
-  mann = FALSE,
-  meanDiff = TRUE,
-  ci = TRUE,
-  effectSize = TRUE,
-  desc = TRUE,
-  plots = TRUE
-)')
+    make_ttest_call <- function(data_arg, indent = "") {
+      paste0(
+        "jmv::ttestIS(\n",
+        indent, "  data = ", data_arg, ",\n",
+        indent, "  vars = ", vars_code, ",\n",
+        indent, '  group = "', group_var, '",\n',
+        indent, "  students = TRUE,\n",
+        indent, "  welchs = TRUE,\n",
+        indent, "  mann = FALSE,\n",
+        indent, "  meanDiff = TRUE,\n",
+        indent, "  ci = TRUE,\n",
+        indent, "  effectSize = TRUE,\n",
+        indent, "  desc = TRUE,\n",
+        indent, "  plots = TRUE\n",
+        indent, ")")
+    }
+
+    # Parse the GROUPS value list (captured raw by parse_single_command).
+    gv_raw <- trimws(parsed$variables$group_values %||% "")
+    vals <- character(0)
+    vals_str <- FALSE
+    if (nzchar(gv_raw)) {
+      if (grepl("['\"]", gv_raw)) {
+        vals_str <- TRUE
+        m <- regmatches(gv_raw, gregexpr("'[^']*'|\"[^\"]*\"", gv_raw))[[1]]
+        vals <- gsub("^['\"]|['\"]$", "", m)
+      } else {
+        vals <- strsplit(gv_raw, "[,[:space:]]+")[[1]]
+        vals <- vals[nzchar(vals)]
+      }
+    }
+
+    if (length(vals) >= 2) {
+      v2 <- vals[1:2]
+      lit <- if (vals_str) paste0('"', v2, '"') else v2
+      lit_vec <- paste0("c(", paste(lit, collapse = ", "), ")")
+      coerce_line <- if (vals_str) {
+        paste0('  .g <- as.character(data[["', group_var, '"]])\n')
+      } else {
+        paste0(
+          '  .g <- data[["', group_var, '"]]\n',
+          "  .g <- if (is.numeric(.g)) as.numeric(.g) else",
+          " suppressWarnings(as.numeric(as.character(.g)))\n")
+      }
+      r_code <- paste0(
+        "local({\n",
+        "  # GROUPS=", group_var, "(", paste(v2, collapse = " "),
+        "): keep only the two listed values; first listed = group 1.\n",
+        coerce_line,
+        "  .keep <- !is.na(.g) & .g %in% ", lit_vec, "\n",
+        "  .d <- data[.keep, , drop = FALSE]\n",
+        '  .d[["', group_var, '"]] <- factor(.g[.keep], levels = ', lit_vec, ")\n",
+        "  ", make_ttest_call(".d", indent = "  "), "\n",
+        "})")
+    } else if (length(vals) == 1 && !vals_str) {
+      v <- vals[1]
+      r_code <- paste0(
+        "local({\n",
+        "  # GROUPS=", group_var, "(", v, "): cut point \u2014 cases >= ", v,
+        " form group 1, cases < ", v, " group 2.\n",
+        '  .g <- data[["', group_var, '"]]\n',
+        "  .g <- if (is.numeric(.g)) as.numeric(.g) else",
+        " suppressWarnings(as.numeric(as.character(.g)))\n",
+        "  .keep <- !is.na(.g)\n",
+        "  .d <- data[.keep, , drop = FALSE]\n",
+        '  .d[["', group_var, '"]] <- factor(ifelse(.g[.keep] >= ', v,
+        ', ">= ', v, '", "< ', v, '"), levels = c(">= ', v, '", "< ', v, '"))\n',
+        "  ", make_ttest_call(".d", indent = "  "), "\n",
+        "})")
+    } else {
+      # No usable value list (bare GROUPS=g, or a quoted single value):
+      # pass through unchanged -- the grouping variable must already be
+      # 2-level, exactly as before this fix. Unverifiable by any corpus GT,
+      # so the conservative behavior is preserved.
+      r_code <- make_ttest_call("data")
+    }
     analysis_type <- "Independent Samples T-Test"
   } else if (length(pair_pairs) > 0) {
     # Paired samples t-test(s) - one or many pairs from PAIRS [WITH] [(PAIRED)]
@@ -793,7 +864,7 @@ jmv::ANOVA(
   emmPlots = TRUE
 )')
     } else {
-      # No factors found — run as one-sample descriptives instead
+      # No factors found -- run as one-sample descriptives instead
       r_code <- glue::glue('
 jmv::descriptives(
   data = data,
@@ -1023,17 +1094,20 @@ convert_reliability <- function(parsed, sav_info) {
   }
   vars_str <- make_vars_str(vars)
 
+  # No omega: SPSS RELIABILITY (/MODEL=ALPHA) computes Cronbach's alpha,
+  # scale statistics, and item-total statistics -- it never computes
+  # McDonald's omega. Emitting omegaScale/omegaItems fabricated scale- and
+  # item-level statistics the source software's output does not contain
+  # (caught by the 2026-08-04 Sonnet canary audit on sample4).
   r_code <- glue::glue('
 jmv::reliability(
   data = data,
   vars = {vars_str},
   alphaScale = TRUE,
-  omegaScale = TRUE,
   meanScale = TRUE,
   sdScale = TRUE,
   corPlot = TRUE,
   alphaItems = TRUE,
-  omegaItems = TRUE,
   meanItems = TRUE,
   sdItems = TRUE,
   itemRestCor = TRUE
@@ -1161,7 +1235,7 @@ jmv::descriptives(
 convert_aggregate <- function(parsed, sav_info) {
   raw <- parsed$raw
   # Helper: capture group 1 of a perl regex (so `\n` in a bracket class means a
-  # newline, not the literal letters "\" and "n" — the latter would truncate a
+  # newline, not the literal letters "\" and "n" -- the latter would truncate a
   # variable list at the first "n", e.g. "gender" -> "ge").
   perl_cap <- function(pat, s) {
     m <- regmatches(s, regexec(pat, s, ignore.case = TRUE, perl = TRUE))[[1]]
@@ -1251,12 +1325,12 @@ convert_factor <- function(parsed, sav_info) {
   # jmv::efa is non-deterministically broken in the worker environment: the
   # byte-identical call in fresh isolated R processes failed 8/8 in one batch
   # with "'names' attribute [N] must be the same length as the vector [0]" and
-  # succeeded 4/4 in another. It is not data-determined — missing variables,
+  # succeeded 4/4 in another. It is not data-determined -- missing variables,
   # full-frame vs subset, haven_labelled columns, and CPU contention were each
   # tested and refuted. psych is already a declared dependency, is
   # deterministic, and reproduces SPSS EXACTLY (verified 2026-08-04 against
   # SPSS ground truth on Driver_Data.sav: KMO .833, Bartlett chi-square
-  # 905.322 df 28, and all 8 communalities identical to 3 dp — see
+  # 905.322 df 28, and all 8 communalities identical to 3 dp -- see
   # tests/testthat/test-factor-psych-engine.R).
   #
   # SPSS FACTOR defaults mirrored here: /MISSING PAIRWISE -> pairwise
@@ -1653,7 +1727,7 @@ convert_compute <- function(parsed, sav_info) {
 
   target <- normalize_spss_names(target)
   # R-0009: guard against a target that fails to normalize to a valid R
-  # identifier (e.g. an unexpanded macro that collapses to "") — emit a NOTE
+  # identifier (e.g. an unexpanded macro that collapses to "") -- emit a NOTE
   # instead of unparseable `dplyr::mutate( = ...)`.
   if (!is_valid_r_ident(target)) {
     return(spss_invalid_ident_note("COMPUTE", parsed$raw,
@@ -1785,7 +1859,7 @@ convert_count <- function(parsed, sav_info) {
   # Build the per-variable match test. `count_value` is the RAW text inside the
   # parentheses, which SPSS allows to be more than a single value:
   #   (1)          single value
-  #   (1,2,3)      value LIST  — match ANY of them
+  #   (1,2,3)      value LIST  -- match ANY of them
   #   (1 THRU 3)   inclusive RANGE
   # Interpolating that text straight into `== {count_value}` produced
   # `== 1,2,3` / `== 1 THRU 3`, neither of which is valid R. knitr then failed
@@ -1795,7 +1869,7 @@ convert_count <- function(parsed, sav_info) {
   # SPSS COUNT never yields missing: a value that is missing simply does not
   # match, and the count stays defined. Guard each test so NA contributes 0
   # rather than propagating NA through the sum. The one exception is a
-  # criterion that deliberately counts missings (MISSING / SYSMIS) — there a
+  # criterion that deliberately counts missings (MISSING / SYSMIS) -- there a
   # `!is.na(x) &` guard would cancel the very thing being counted, so wrap in
   # isTRUE-style NA coercion instead of excluding NA rows.
   counts_missing <- grepl("\\b(MISSING|SYSMIS)\\b", count_value, ignore.case = TRUE)
@@ -1945,7 +2019,7 @@ convert_if <- function(parsed, sav_info) {
     }
 
     # If target already exists, use if_else to preserve existing values.
-    # missing = {target}: SPSS semantics — when the IF condition is MISSING the
+    # missing = {target}: SPSS semantics -- when the IF condition is MISSING the
     # assignment is not made and the case keeps its prior value. Without it,
     # if_else() writes NA wherever the condition is NA (e.g. user-missing codes
     # nulled by read_sav), destroying values shipped in the .sav ("Math is
@@ -2017,7 +2091,7 @@ convert_filter <- function(parsed, sav_info) {
   # by annotate_filter_state(); each downstream procedure receives a
   # `filter_var` annotation and wraps its r_code in a local() block.
   # The FILTER command itself emits only a comment, so the row filter is
-  # never applied globally to `data`. This is the correct SPSS semantics —
+  # never applied globally to `data`. This is the correct SPSS semantics --
   # FILTER changes which cases are included for analyses, not the dataset.
   if (isTRUE(parsed$variables$filter_off)) {
     r_code <- "# FILTER OFF (subsequent analyses will use the unfiltered data)"
@@ -2247,7 +2321,7 @@ expand_spss_to_ranges <- function(expr, sav_info) {
     from_idx <- match(toupper(from_var), all_vars_upper)
     to_idx <- match(toupper(to_var), all_vars_upper)
     if (is.na(from_idx) || is.na(to_idx) || from_idx > to_idx) {
-      # Not contiguous in the dictionary — try a lexical numeric expansion
+      # Not contiguous in the dictionary -- try a lexical numeric expansion
       # before falling back to dropping the middle of the range.
       lexical <- .expand_to_numeric_lexical(from_var, to_var)
       if (!is.null(lexical)) return(paste(lexical, collapse = ", "))
@@ -2321,7 +2395,7 @@ convert_spss_expression <- function(expr) {
 
   # SPSS word-form relational operators (NE/EQ/LT/GT/LE/GE).
   # Must run BEFORE the single-`=` -> `==` rule below so we don't double-convert
-  # the EQ replacement. Word-bounded, case-insensitive — SPSS accepts mixed case.
+  # the EQ replacement. Word-bounded, case-insensitive -- SPSS accepts mixed case.
   r_expr <- gsub("\\bNE\\b", "!=", r_expr, ignore.case = TRUE, perl = TRUE)
   r_expr <- gsub("\\bLE\\b", "<=", r_expr, ignore.case = TRUE, perl = TRUE)
   r_expr <- gsub("\\bGE\\b", ">=", r_expr, ignore.case = TRUE, perl = TRUE)
@@ -2470,7 +2544,7 @@ convert_spss_expression <- function(expr) {
   # round-2 outlier with a single change.
   #
   # Applied last so all SPSS-specific tokens (e.g. EXP, MISSING) have
-  # already been rewritten — this ONLY rewrites variable identifiers.
+  # already been rewritten -- this ONLY rewrites variable identifiers.
   # Inside string literals stays untouched (we look for letter+$/#/@+letter
   # boundaries, which don't appear in normal R code we've already emitted).
   r_expr <- gsub(
@@ -2643,7 +2717,7 @@ extract_recode_rules <- function(cmd) {
 #' ASCII punctuation (spaces, parens, hyphens, ...) collapses to "." as before.
 #' NON-ASCII letters (Hebrew/Cyrillic/accented, common in international .sav
 #' files) are mapped to a deterministic per-codepoint token "_UXXXX_" instead of
-#' a bare "." — otherwise distinct names that differ ONLY by a non-ASCII letter
+#' a bare "." -- otherwise distinct names that differ ONLY by a non-ASCII letter
 #' (e.g. Hebrew `TV<aleph>1` / `TV<bet>1` / `TV<gimel>1`) would all collapse to
 #' the same `TV.1`, producing DUPLICATE column names. dplyr then aborts every
 #' downstream transform with "Can't transform a data frame with duplicate
@@ -2760,8 +2834,22 @@ expand_spss_variables <- function(parsed_command, sav_info, all_var_names = NULL
   }
 
   if (!is.null(parsed_command$variables)) {
+    # REGRESSION stores its per-/METHOD predictor lists at
+    # $variables$method_blocks as a LIST OF character vectors, and
+    # make_regression_code() emits them straight into jmv::linReg(blocks = ...).
+    # The is.character() branch below skips a list, so those blocks kept the
+    # literal "TO" token and jmv died with an opaque "object 'XVE8' not found"
+    # while SPSS itself expands the range and reports the full model. Recurse
+    # one level into a list of character vectors so blocks expand too.
     parsed_command$variables <- lapply(parsed_command$variables, function(x) {
-      if (is.character(x)) expand_to_syntax(x, all_names) else x
+      if (is.character(x)) {
+        expand_to_syntax(x, all_names)
+      } else if (is.list(x) && length(x) &&
+                 all(vapply(x, is.character, logical(1)))) {
+        lapply(x, function(b) expand_to_syntax(b, all_names))
+      } else {
+        x
+      }
     })
 
     # A literal "TO" surviving in a variable vector means neither the dataset
@@ -2770,12 +2858,23 @@ expand_spss_variables <- function(parsed_command, sav_info, all_var_names = NULL
     # the caller emits a clean Conversion Note instead of handing the bare "TO"
     # token to jmv (which would crash). Reconstruct the offending "A TO B" pairs
     # for the note.
-    leftover <- vapply(parsed_command$variables, function(x) {
-      is.character(x) && any(toupper(x) == "TO")
+    # Flatten one level so a nested block list (REGRESSION method_blocks) is
+    # checked too -- an unresolvable range there must raise the flag as well,
+    # or the caller hands a bare "TO" token to jmv.
+    to_check <- list()
+    for (x in parsed_command$variables) {
+      if (is.character(x)) {
+        to_check[[length(to_check) + 1L]] <- x
+      } else if (is.list(x)) {
+        for (b in x) if (is.character(b)) to_check[[length(to_check) + 1L]] <- b
+      }
+    }
+    leftover <- vapply(to_check, function(x) {
+      any(toupper(x) == "TO")
     }, logical(1))
     if (any(leftover)) {
       ranges <- character(0)
-      for (x in parsed_command$variables[leftover]) {
+      for (x in to_check[leftover]) {
         pos <- which(toupper(x) == "TO")
         pos <- pos[pos > 1 & pos < length(x)]
         ranges <- c(ranges, sprintf("%s TO %s", x[pos - 1], x[pos + 1]))
@@ -2793,9 +2892,9 @@ expand_spss_variables <- function(parsed_command, sav_info, all_var_names = NULL
 #' SPSS's `var1 TO varN` most commonly enumerates a family of names that share
 #' a common prefix/suffix and differ only by a trailing integer field
 #' (`item1 TO item10`, `risk01_prep2 TO risk07_prep2`, `Q1a TO Q5a`). When the
-#' .sav dictionary lookup fails — because the items were COMPUTE-created at
+#' .sav dictionary lookup fails -- because the items were COMPUTE-created at
 #' runtime (not in any .sav), or the script is paired with multiple .sav and the
-#' primary one doesn't hold these vars — we can still reproduce SPSS's intent by
+#' primary one doesn't hold these vars -- we can still reproduce SPSS's intent by
 #' expanding that integer field lexically. This is correct for the dominant
 #' contiguous-numeric idiom and, crucially, stops the literal keyword `'TO'` from
 #' leaking into the generated jmv/dplyr call (which crashes with
@@ -2832,7 +2931,7 @@ expand_spss_variables <- function(parsed_command, sav_info, all_var_names = NULL
   rac <- strsplit(ra, "", fixed = TRUE)[[1]]
   rbc <- strsplit(rb, "", fixed = TRUE)[[1]]
 
-  # Longest common SUFFIX of the residuals (digits allowed — a constant trailing
+  # Longest common SUFFIX of the residuals (digits allowed -- a constant trailing
   # field like "_prep2" legitimately ends in a digit), backed off any leading
   # digits so it cannot eat into the varying integer field.
   suf_len <- 0L
@@ -2911,7 +3010,7 @@ expand_to_syntax <- function(vars, all_names) {
     } else {
       # SAV dictionary lookup failed (computed vars not in any .sav, or a
       # multi-.sav script whose primary file lacks these names). Try a lexical
-      # numeric-sibling expansion before giving up — leaving the literal "TO" in
+      # numeric-sibling expansion before giving up -- leaving the literal "TO" in
       # the var list crashes the downstream jmv call.
       lexical <- .expand_to_numeric_lexical(start_var, end_var)
       if (!is.null(lexical)) {
