@@ -35,6 +35,7 @@ Suggests:
     modelsummary,
     kableExtra,
     testthat (>= 3.0.0),
+    vctrs,
     shiny,
     knitr
 VignetteBuilder: knitr

@@ -38,7 +38,7 @@ affected commands should be re-run.
 * Documentation and dependency declarations corrected (`utils::modifyList`
   declared, `olsrr` moved to Suggests, roxygen blocks repaired).
 
-# spss2rmarkdown (development)
+## Conversion coverage
 
 * `$CASENUM`, SPSS's per-case sequential row number, translates to
   `dplyr::row_number()` (previously only `$SYSMIS` among bare-`$` system
