@@ -111,6 +111,12 @@ convert_all_commands <- function(parsed_commands, sav_info, all_var_names = NULL
       result <- convert_spss_to_r(cmd, sav_info, all_var_names = expand_names)
     }
     result$order <- i
+    # Carry the ACTIVE dataset through to the generator. annotate_dataset_state()
+    # stamped it on every parsed command; without it here, a script that switches
+    # datasets with GET FILE / DATASET ACTIVATE would still emit every analysis
+    # against the single primary dataset. NA = "the primary dataset", which is
+    # every single-dataset script and therefore the unchanged path.
+    result$dataset_key <- cmd$dataset_key %||% NA_character_
     explicit_xform <- isTRUE(result$is_transformation)
     result$is_transformation <- explicit_xform || (cmd$command_type %in% DATA_COMMANDS)
     results[[i]] <- result
@@ -162,7 +168,7 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
     "groups", "factors", "covariates", "dv", "wls", "filter_var",
     "variables", "pairs", "factor", "row", "column", "y", "x", "m", "w",
     "source_vars", "target_vars", "split_var",
-    "main_vars", "controls",
+    "main_vars", "with_vars", "controls",
     "rank_vars", "rank_groups"
   )
 
@@ -280,6 +286,32 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
     # expression is available (older parses / IF-defined filters): only filter if
     # the column is actually present, otherwise leave data unfiltered rather than
     # erroring the whole analysis.
+    #
+    # The recompute is UNCONDITIONAL when we have the syntax's own definition
+    # (C-0002, 2026-09-09). It used to be gated on `if (!<fv> %in% names(data))`,
+    # i.e. "use the stored column when the .sav happens to ship one" -- which is
+    # backwards for the ordinary SPSS idiom, where the script COMPUTEs the filter
+    # variable and REDEFINES it before each FILTER BY. SPSS runs on the recomputed
+    # value; a same-named column in the .sav is whatever the researcher happened to
+    # save last and is stale by construction. Measured on
+    # osf_5a91c46cda91d4000fb0_sample4 + osf_wdnpx_sample4.sav: the stored ADIFILT
+    # kept 178 of 212 rows, the syntax's own rule kept 97, and SPSS reported 97.
+    # The PARTIAL CORR under it moved from r = .125, p = .225, df = 94 (SPSS) to
+    # r = .153, p = .042, df = 174 -- across p = .05, with nothing erroring.
+    # See tests/testthat/test-filter-recompute-wins.R.
+    #
+    # A recompute can still fail legitimately: the expression may reference a
+    # variable this .sav does not carry. SPSS cannot recompute in that case
+    # either -- its own gold for such a command records `Error # 4285 ... Text:
+    # <var>` and SPSS carries on with the stale stored column. So we do the same,
+    # and say which variable was missing rather than substituting silently. The
+    # test is `all.vars()` on the converted expression, which is R's own parser
+    # answering "what does this need", not a guess. tryCatch stays as a backstop
+    # for the errors variable presence cannot predict (type mismatches, etc.).
+    # Suggested during peer review on 2026-09-09; the reviewers'
+    # gta94 counter-case did not hold up (FLUENTLY *is* present in that .sav, 69
+    # of 103 rows, and nothing but OMS runs under that filter) but the rule they
+    # proposed is better than a bare tryCatch, so it is the primary path here.
     # filter_expr is a structured record from annotate_filter_state():
     #   list(kind="COMPUTE", expr=...)            -> column = (expr)
     #   list(kind="IF", cond=..., expr=...)        -> column = if_else(cond, expr, NA)
@@ -304,8 +336,24 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
       }
       if (nzchar(r_col)) {
         recompute_line <- paste0(
-          "  if (!\"", fv, "\" %in% names(data)) ",
-          "data <- dplyr::mutate(data, `", fv, "` = ", r_col, ")\n")
+          "  # SPSS recomputes ", fv, " from the syntax before FILTER BY, so a\n",
+          "  # same-named column stored in the .sav is stale and must not win.\n",
+          "  # If the expression needs a variable this data does not have, SPSS\n",
+          "  # could not recompute either and kept the stored column -- so do that,\n",
+          "  # and name the missing variable.\n",
+          "  .s2r_fmiss <- setdiff(all.vars(quote(", r_col, ")), names(data))\n",
+          "  if (length(.s2r_fmiss) == 0L) {\n",
+          "    data <- tryCatch(dplyr::mutate(data, `", fv, "` = ", r_col, "),\n",
+          "                     error = function(e) { .s2r_fmiss <<- \"<recompute failed>\"; data })\n",
+          "  }\n",
+          "  if (length(.s2r_fmiss)) {\n",
+          "    if (!\"", fv, "\" %in% names(data)) ",
+          "stop(\"FILTER BY ", fv, ": cannot recompute (missing: \", ",
+          "paste(.s2r_fmiss, collapse = \", \"), \") and no stored column exists\", call. = FALSE)\n",
+          "    cat(\"\\n\\n> **Conversion note:** `", fv, "` could not be recomputed from the syntax \",\n",
+          "        \"(missing: \", paste(.s2r_fmiss, collapse = \", \"), \"). The column stored in the .sav \",\n",
+          "        \"was used instead, so the number of cases may not match the original analysis.\\n\\n\", sep = \"\")\n",
+          "  }\n")
       }
     }
     filter_line <- if (nzchar(recompute_line)) {
@@ -414,30 +462,142 @@ convert_frequencies <- function(parsed, sav_info) {
   }
   vars_str <- make_vars_str(vars)
 
+  charts <- .spss_frequencies_charts(parsed$raw)
+  # jmv has no pie chart, and no FITTED normal overlay. Record each request
+  # rather than redrawing it as something else.
+  unconv <- c(
+    if (isTRUE(charts$pie)) "/PIECHART",
+    if (isTRUE(charts$normal)) "/HISTOGRAM NORMAL (the fitted normal curve)"
+  )
+  pie_note <- if (length(unconv)) {
+    paste0("\n# NOTE: ", paste(unconv, collapse = " and "),
+           " requested; jmv has no equivalent, so none is drawn.")
+  } else ""
+
   r_code <- glue::glue('
 jmv::descriptives(
   data = data,
   vars = {vars_str},
   freq = TRUE,
-  hist = TRUE,
-  bar = TRUE
-)')
+  hist = {toupper(charts$hist)},
+  dens = FALSE,
+  bar = {toupper(charts$bar)}
+){pie_note}')
 
   list(r_code = r_code, packages = "jmv",
        analysis_type = "Frequencies", variables = vars)
 }
 
-convert_correlations <- function(parsed, sav_info) {
-  vars <- parsed$variables$all
-  if (length(vars) < 2) {
-    return(list(
-      r_code = "# CORRELATIONS: Need at least 2 variables",
-      packages = character(), analysis_type = "Correlation Analysis"
-    ))
-  }
-  vars_str <- make_vars_str(vars)
+# ---------------------------------------------------------------------------
+# CORRELATIONS / PARTIAL CORR
+#
+# SPSS reads `/VARIABLES = A B C WITH X Y Z BY ctrl` as a RECTANGULAR request:
+# the |x| * |y| cross pairs of {A,B,C} against {X,Y,Z}, optionally partialling
+# out the BY variables. Verified against the frozen SPSS output for the corpus
+# file osf_5a91c46cda91d4000fb0_sample4 (round-2-spss/2-ground-truth), where the
+# printed tables put the x variables in rows and the y variables in columns.
+# ---------------------------------------------------------------------------
 
-  r_code <- glue::glue('
+# Case-deletion rule for a correlation command.
+#
+# SPSS writes /MISSING explicitly whenever the syntax was pasted from the
+# dialogs. Measured on that corpus file: all 142 CORRELATIONS carry
+# /MISSING=PAIRWISE, and the 16 PARTIAL CORR split 13 LISTWISE / 3 ANALYSIS.
+# Defaults (used only when the subcommand is absent) are PAIRWISE for
+# CORRELATIONS and LISTWISE for PARTIAL CORR, per the IBM syntax reference.
+.s2r_corr_missing <- function(parsed, default_listwise) {
+  miss <- toupper(trimws(parsed$options$missing %||% ""))
+  if (!nzchar(miss)) return(default_listwise)
+  if (miss %in% c("PAIRWISE", "ANALYSIS")) return(FALSE)
+  if (miss == "LISTWISE") return(TRUE)
+  default_listwise
+}
+
+# TRUE when the command asks for one-tailed significance.
+#   CORRELATIONS /PRINT=ONETAIL ...   PARTIAL CORR /SIGNIFICANCE=ONETAIL
+# SPSS's one-tailed significance is the two-tailed value halved (the direction
+# is taken from the sign of the coefficient), and the column is relabelled.
+# 18 of this corpus file's CORRELATIONS commands ask for it; printing the
+# two-tailed p under a one-tailed request doubles every reported significance.
+.s2r_corr_onetail <- function(parsed) {
+  pr <- toupper(parsed$options$print %||% character())
+  sg <- toupper(parsed$options$significance %||% character())
+  any(pr == "ONETAIL") || any(sg == "ONETAIL")
+}
+
+# Emit the rectangular block {x} x {y} of zero-order Pearson correlations, laid
+# out the way SPSS lays it out: rows = x variables x {r, p, N}, columns = y.
+# jmv::corrMatrix has no `with` option -- it can only produce the full square
+# matrix -- so a WITH request is served with stats::cor.test, one call per pair.
+.s2r_emit_corr_block <- function(x_vars, y_vars, listwise, onetail) {
+  mask <- if (listwise) {
+    # /MISSING=LISTWISE drops any case incomplete on ANY variable named in the
+    # command, so every cell shares one case set.
+    c("  .base <- stats::complete.cases(data[, unique(c(.x, .y)), drop = FALSE])",
+      "  .mask <- function(.i, .j) .base")
+  } else {
+    # /MISSING=PAIRWISE (the CORRELATIONS default) evaluates each pair on its
+    # own complete cases, so N varies from cell to cell -- which is what the
+    # frozen SPSS output shows (N = 98 / 97 / 99 across one row).
+    c("  .mask <- function(.i, .j) stats::complete.cases(data[[.i]], data[[.j]])")
+  }
+  plab <- if (onetail) "Sig. (1-tailed)" else "Sig. (2-tailed)"
+  padj <- if (onetail) "      .p <- .p / 2" else "      .p <- .p"
+
+  paste(c(
+    "local({",
+    paste0("  .x <- ", paste(deparse(x_vars), collapse = "")),
+    paste0("  .y <- ", paste(deparse(y_vars), collapse = "")),
+    mask,
+    "  .blocks <- lapply(.x, function(.i) {",
+    "    .cells <- lapply(.y, function(.j) {",
+    "      .ok <- .mask(.i, .j)",
+    "      if (identical(.i, .j)) {",
+    # SPSS prints the self-correlation as 1.000 with its significance blank --
+    # a variable tested against itself is not an inferential correlation.
+    "        return(c(1, NA_real_, sum(.ok)))",
+    "      }",
+    # Only errors are caught. A warning must NOT be turned into NA: cor.test
+    # already returns NA for a zero-variance pair (measured 2026-09-09), so
+    # swallowing warnings could only ever discard a good coefficient.
+    "      .ct <- suppressWarnings(tryCatch(",
+    "        stats::cor.test(data[[.i]][.ok], data[[.j]][.ok]),",
+    "        error = function(e) NULL))",
+    "      if (is.null(.ct)) return(c(NA_real_, NA_real_, sum(.ok)))",
+    "      .p <- .ct$p.value",
+    padj,
+    "      c(round(unname(.ct$estimate), 3), round(.p, 3), sum(.ok))",
+    "    })",
+    "    .m <- as.data.frame(do.call(cbind, .cells), stringsAsFactors = FALSE)",
+    "    names(.m) <- .y",
+    "    cbind(Variable = c(.i, \"\", \"\"),",
+    paste0("          Statistic = c(\"Pearson r\", \"", plab, "\", \"N\"),"),
+    "          .m, stringsAsFactors = FALSE)",
+    "  })",
+    "  .out <- do.call(rbind, .blocks)",
+    "  rownames(.out) <- NULL",
+    "  .out",
+    "})"
+  ), collapse = "\n")
+}
+
+convert_correlations <- function(parsed, sav_info) {
+  x_vars <- parsed$variables$main_vars %||% parsed$variables$all
+  y_vars <- parsed$variables$with_vars %||% character()
+
+  if (length(y_vars) == 0) {
+    # No WITH: SPSS reports the square (lower-triangle) matrix over the whole
+    # list, which is what jmv::corrMatrix produces.
+    vars <- parsed$variables$all
+    if (length(vars) < 2) {
+      return(list(
+        r_code = "# CORRELATIONS: Need at least 2 variables",
+        packages = character(), analysis_type = "Correlation Analysis"
+      ))
+    }
+    vars_str <- make_vars_str(vars)
+
+    r_code <- glue::glue('
 jmv::corrMatrix(
   data = data,
   vars = {vars_str},
@@ -447,19 +607,40 @@ jmv::corrMatrix(
   sig = TRUE,
   flag = TRUE,
   ci = TRUE,
-  plots = TRUE,
-  plotDens = TRUE,
-  plotStats = TRUE
+  plots = FALSE,
+  plotDens = FALSE,
+  plotStats = FALSE
 )')
 
-  list(r_code = r_code, packages = "jmv",
-       analysis_type = "Correlation Analysis", variables = vars)
+    return(list(r_code = r_code, packages = "jmv",
+                analysis_type = "Correlation Analysis", variables = vars))
+  }
+
+  # WITH present: SPSS reports ONLY the rectangular block {x} x {y}. Before
+  # 2026-09-09 the keyword was dropped by extract_variables_clause() and the
+  # converter emitted the full square matrix -- coefficients presented as if
+  # the researcher had asked for them (107 of this file's 142 commands).
+  if (length(x_vars) == 0) {
+    return(list(
+      r_code = "# CORRELATIONS: WITH clause has no left-hand variables",
+      packages = character(), analysis_type = "Correlation Analysis"
+    ))
+  }
+
+  list(r_code = .s2r_emit_corr_block(x_vars, y_vars,
+                                     .s2r_corr_missing(parsed, FALSE),
+                                     .s2r_corr_onetail(parsed)),
+       packages = character(),
+       analysis_type = "Correlation Analysis",
+       variables = c(x_vars, y_vars))
 }
 
 convert_partial_corr <- function(parsed, sav_info) {
-  # Prefer the parser-supplied main_vars / controls (BY-aware split). Fall back
-  # to legacy 'all' parsing only if those are missing.
+  # Prefer the parser-supplied x-set / y-set / controls split (WITH- and
+  # BY-aware -- see split_corr_variables_clause()). Fall back to legacy 'all'
+  # parsing only if those are missing.
   main_vars <- parsed$variables$main_vars
+  with_vars <- parsed$variables$with_vars %||% character()
   controls  <- parsed$variables$controls
   if (is.null(main_vars) || length(main_vars) == 0) {
     vars <- parsed$variables$all
@@ -480,9 +661,31 @@ convert_partial_corr <- function(parsed, sav_info) {
   }
   if (is.null(controls)) controls <- character()
 
-  if (length(main_vars) < 2 || length(controls) == 0) {
-    # Without controls, fall back to a regular correlation via jmv
-    main_str <- make_vars_str(main_vars)
+  onetail <- .s2r_corr_onetail(parsed)
+
+  if (length(controls) == 0) {
+    # No BY clause: with nothing partialled out these are ordinary zero-order
+    # correlations. Route a WITH request through the SAME rectangular emitter
+    # as CORRELATIONS -- falling back to jmv::corrMatrix over the union here
+    # would reintroduce, for this case, exactly the over-reporting bug this
+    # pair of functions exists to fix. (All three /consult seats, 2026-09-09;
+    # reproduced before fixing: a 3 x 2 request emitted 10 pairs, not 6.)
+    if (length(with_vars) > 0 && length(main_vars) > 0) {
+      return(list(
+        r_code = .s2r_emit_corr_block(main_vars, with_vars,
+                                      .s2r_corr_missing(parsed, TRUE), onetail),
+        packages = character(),
+        analysis_type = "Partial Correlation",
+        variables = c(main_vars, with_vars)))
+    }
+    fallback_vars <- unique(c(main_vars, with_vars))
+    if (length(fallback_vars) < 2) {
+      return(list(
+        r_code = "# PARTIAL CORR: Need at least 2 variables",
+        packages = character(), analysis_type = "Partial Correlation"
+      ))
+    }
+    main_str <- make_vars_str(fallback_vars)
     r_code <- glue::glue('
 # PARTIAL CORR with no controls -- fallback to regular correlation
 jmv::corrMatrix(
@@ -491,39 +694,118 @@ jmv::corrMatrix(
 )')
     return(list(r_code = r_code, packages = "jmv",
                 analysis_type = "Partial Correlation",
-                variables = c(main_vars, controls)))
+                variables = fallback_vars))
   }
 
-  # Emit ppcor::pcor.test for each pair in main_vars (typically a single pair
-  # like (jobsat1, FWDfwagency)). Controls are the BY variables.
-  control_names <- paste(paste0('"', controls, '"'), collapse = ", ")
-  pair_blocks <- character()
-  for (i in seq_len(length(main_vars) - 1)) {
-    for (j in seq(i + 1, length(main_vars))) {
-      a <- main_vars[i]; b <- main_vars[j]
-      pair_blocks <- c(pair_blocks, sprintf(
-'  cat("\\n## Partial r: %s ~ %s controlling for %s\\n")
-  .controls <- c(%s)
-  .keep <- stats::complete.cases(data[, c("%s", "%s", .controls)])
-  .pc <- ppcor::pcor.test(
-    x = data[["%s"]][.keep],
-    y = data[["%s"]][.keep],
-    z = data[, .controls, drop = FALSE][.keep, , drop = FALSE]
-  )
-  print(.pc)',
-        a, b, paste(controls, collapse = ", "),
-        control_names,
-        a, b,
-        a, b))
+  # SPSS `/VARIABLES = A B C WITH X Y Z BY ctrl` asks for the |x| * |y| cross
+  # pairs; without WITH it is every pair of the list, choose(n, 2).
+  if (length(with_vars) > 0) {
+    grid <- expand.grid(i = seq_along(main_vars), j = seq_along(with_vars))
+    pair_list <- Map(function(i, j) c(main_vars[i], with_vars[j]), grid$i, grid$j)
+  } else {
+    pair_list <- list()
+    if (length(main_vars) >= 2) {
+      for (i in seq_len(length(main_vars) - 1)) {
+        for (j in seq(i + 1, length(main_vars))) {
+          pair_list <- c(pair_list, list(c(main_vars[i], main_vars[j])))
+        }
+      }
     }
   }
-  r_code <- paste0("local({\n",
-                   paste(pair_blocks, collapse = "\n\n"),
-                   "\n  invisible(NULL)\n})")
+  if (length(pair_list) == 0) {
+    return(list(
+      r_code = "# PARTIAL CORR: Need at least 2 variables",
+      packages = character(), analysis_type = "Partial Correlation"
+    ))
+  }
 
-  list(r_code = r_code, packages = "ppcor",
+  # SPSS PARTIAL CORR has two genuinely different missing-data modes, and the
+  # frozen SPSS output shows the difference directly:
+  #
+  #   /MISSING=LISTWISE (the default, 13 of this file's 16 commands)
+  #     "Statistics are based on cases with no missing data for any variable
+  #      listed." Every cell shares one case set, so every cell shares one df.
+  #   /MISSING=ANALYSIS (3 commands)
+  #     "Statistics for each pair ... valid data for that pair. Partial
+  #      correlations are computed from zero-order correlations."
+  #     df then VARIES cell to cell -- 94 and 93 in the same table
+  #     (2-ground-truth/spss/osf_5a91c46cda91d4000fb0_sample4.txt:38846-38857).
+  #
+  # LISTWISE is served by ppcor::pcor.test on the one shared case set. ANALYSIS
+  # is served by inverting the PAIRWISE zero-order correlation matrix, which is
+  # what SPSS documents itself as doing; listwise-deleting each (x, y, controls)
+  # triple instead is a third quantity that matches neither.
+  listwise    <- .s2r_corr_missing(parsed, default_listwise = TRUE)
+  pairs_lit   <- paste0("list(", paste(vapply(pair_list, function(pr)
+                        paste(deparse(pr), collapse = ""), character(1)),
+                        collapse = ", "), ")")
+  controls_lit <- paste(deparse(controls), collapse = "")
+  all_lit      <- paste(deparse(unique(c(main_vars, with_vars, controls))),
+                        collapse = "")
+  plab <- if (onetail) "Sig. (1-tailed)" else "Sig. (2-tailed)"
+  phalf <- if (onetail) "    .p <- .p / 2" else "    .p <- .p"
+
+  body <- if (listwise) c(
+    paste0("  .all <- ", all_lit),
+    "  .base <- stats::complete.cases(data[, .all, drop = FALSE])",
+    "  .rows <- lapply(.pairs, function(.pr) {",
+    "    .keep <- .base",
+    "    if (sum(.keep) <= length(.controls) + 2L) return(NULL)",
+    "    .pc <- tryCatch(",
+    "      ppcor::pcor.test(",
+    "        x = data[[.pr[1]]][.keep],",
+    "        y = data[[.pr[2]]][.keep],",
+    "        z = data[, .controls, drop = FALSE][.keep, , drop = FALSE]),",
+    "      error = function(e) NULL)",
+    "    if (is.null(.pc)) return(NULL)",
+    "    .r <- .pc$estimate; .n <- .pc$n; .df <- .pc$n - .pc$gp - 2L",
+    "    .p <- .pc$p.value",
+    phalf,
+    "    data.frame(Variable = .pr[1], With = .pr[2],",
+    "      `Partial r` = round(.r, 3), df = .df,",
+    paste0("      `", plab, "` = round(.p, 3), N = .n,"),
+    "      Missing = \"LISTWISE\", check.names = FALSE, stringsAsFactors = FALSE)",
+    "  })"
+  ) else c(
+    "  .rows <- lapply(.pairs, function(.pr) {",
+    "    .vars <- unique(c(.pr, .controls))",
+    # Pairwise zero-order matrix, then partial by inverting it -- SPSS's own
+    # description of /MISSING=ANALYSIS.
+    "    .R <- suppressWarnings(stats::cor(data[, .vars, drop = FALSE],",
+    "                                      use = \"pairwise.complete.obs\"))",
+    "    if (anyNA(.R)) return(NULL)",
+    "    .P <- tryCatch(solve(.R), error = function(e) NULL)",
+    "    if (is.null(.P)) return(NULL)",
+    "    .r <- -.P[.pr[1], .pr[2]] / sqrt(.P[.pr[1], .pr[1]] * .P[.pr[2], .pr[2]])",
+    # df uses the pair's own valid N, which is what makes df vary by cell.
+    "    .n <- sum(stats::complete.cases(data[[.pr[1]]], data[[.pr[2]]]))",
+    "    .df <- .n - length(.controls) - 2L",
+    "    if (.df <= 0 || is.na(.r) || abs(.r) >= 1) return(NULL)",
+    "    .t <- .r * sqrt(.df) / sqrt(1 - .r^2)",
+    "    .p <- 2 * stats::pt(-abs(.t), .df)",
+    phalf,
+    "    data.frame(Variable = .pr[1], With = .pr[2],",
+    "      `Partial r` = round(.r, 3), df = .df,",
+    paste0("      `", plab, "` = round(.p, 3), N = .n,"),
+    "      Missing = \"ANALYSIS\", check.names = FALSE, stringsAsFactors = FALSE)",
+    "  })"
+  )
+
+  r_code <- paste(c(
+    "local({",
+    paste0("  .pairs <- ", pairs_lit),
+    paste0("  .controls <- ", controls_lit),
+    body,
+    "  .out <- do.call(rbind, .rows)",
+    "  if (is.null(.out)) return(NULL)",
+    "  rownames(.out) <- NULL",
+    "  .out",
+    "})"
+  ), collapse = "\n")
+
+  list(r_code = r_code, packages = if (listwise) "ppcor" else character(),
        analysis_type = "Partial Correlation",
-       variables = c(main_vars, controls))
+       variables = c(main_vars, with_vars, controls))
 }
 
 convert_ttest <- function(parsed, sav_info) {
@@ -563,7 +845,7 @@ convert_ttest <- function(parsed, sav_info) {
         indent, "  ci = TRUE,\n",
         indent, "  effectSize = TRUE,\n",
         indent, "  desc = TRUE,\n",
-        indent, "  plots = TRUE\n",
+        indent, "  plots = FALSE\n",
         indent, ")")
     }
 
@@ -805,9 +1087,15 @@ jmv::anovaRM(
 )
 }}')
 
+    # This converter performs its own presence check above and deliberately
+    # reports a SOFT "Analysis skipped:" note rather than an error, so the
+    # generator's general pre-flight must stand down here -- otherwise the same
+    # condition is reported twice, and the harder of the two wins (measured
+    # 2026-09-05: round-3-spss/"Analyses" went GREEN -> YELLOW purely from the
+    # double guard). One condition, one report.
     return(list(r_code = r_code, packages = "jmv",
                 analysis_type = "Repeated-Measures ANOVA",
-                variables = dvs))
+                variables = dvs, self_guards_variables = TRUE))
   }
 
   # ---- Between-subjects factorial ANOVA / ANCOVA (existing behaviour) ----
@@ -945,6 +1233,178 @@ extract_stepwise_pin_pout <- function(cmd_raw) {
   list(pin = pin, pout = pout)
 }
 
+# Which jmv::linReg options did this REGRESSION command actually ASK for?
+#
+# Until 2026-09-09 convert_regression() emitted seventeen options TRUE from a
+# fixed template, whatever the syntax said. The worst was `durbin = TRUE`: jmv
+# computes the Durbin-Watson p by SIMULATION and the generated .Rmd sets no
+# seed, so the same document re-knitted on the same data printed a different p.
+# Measured over six identical calls, N = 210: autocorrelation 0.1300234 and DW
+# 1.731849 identical every time, p = .042 .050 .042 .034 .062 .044 -- five
+# distinct values STRADDLING .05. In a report whose purpose is reproducibility
+# that is the most serious defect class there is.
+#
+# And it was never requested. Two-sided control on the round-2 `sample4` pair:
+# `/RESIDUALS` 0 and `DURBIN` 0 in the .sps, `Durbin` 0 in the frozen SPSS gold,
+# against `REGRESSION` 203 in the .sps and `Model Summary` 256 in the gold -- so
+# the zeros are real zeros, and we were inventing 203 autocorrelation tables.
+#
+# The rule is the project's rule: WE CONVERT THE SYNTAX. An option is on when
+# the command asks for it, keyed off the SPSS subcommand that governs it, never
+# off a file or a variable.
+#
+# Always on, because SPSS prints them without being asked: R, R Square and
+# Adjusted R Square (Model Summary), the ANOVA table (in /STATISTICS DEFAULTS),
+# and the standardized Beta (always in the Coefficients table). AIC, BIC and
+# RMSE appear in NO SPSS REGRESSION table, so they are off unless /STATISTICS
+# ALL. Options are emitted explicitly as FALSE rather than omitted, so the
+# generated report records the decision instead of hiding it.
+# Read an SPSS keyword only WITHIN its own subcommand, so `/STATISTICS ... COLLIN`
+# is not satisfied by the word COLLIN sitting under `/RESIDUALS`, and a variable
+# that happens to be named DURBIN or HISTOGRAM does not switch a test or a plot
+# on. Shared by the regression option map and the plot gates below.
+# A slash inside a QUOTED STRING is not a subcommand delimiter. SPSS reads
+# `REGRESSION SELECT sex EQ '/RESIDUALS NORMPROB'` as a SELECT comparison value;
+# we read it as a /RESIDUALS subcommand and fabricated a residual normal-
+# probability plot the report then presented as SPSS output. That is the same
+# fabrication class as the defect this whole gate exists for.
+# Found by consult seat `sol`, 2026-09-09; reproduced here against a control
+# (the identical command without the literal gave norm = FALSE) before the fix.
+# Both quote styles are handled; a literal becomes a single blank.
+.spss_mask_literals <- function(txt) {
+  txt <- gsub("'[^']*'", " ", txt, perl = TRUE)
+  gsub('"[^"]*"', " ", txt, perl = TRUE)
+}
+
+.spss_sub_text <- function(raw) {
+  .spss_mask_literals(toupper(paste(as.character(raw %||% ""), collapse = " ")))
+}
+
+# SPSS lets a subcommand or keyword be truncated to its shortest unambiguous
+# form, so `/HIST` really does draw a histogram and `/PLOT NPPL` really does draw
+# a normal probability plot. Matching only the full word converts those with the
+# plot OFF -- silently removing a chart from a published report, which is the
+# direction that costs the most.
+#
+# Found by consult seat `sonnet`, 2026-09-09, reviewing 90bde10. Measured
+# exposure inside the commands actually gated: ZERO truncations in the 287-file
+# corpus (FREQUENCIES carried /HISTOGRAM 32, /PIECHART 4, /BARCHART 2; EXAMINE's
+# /PLOT carried BOXPLOT 137, HISTOGRAM 77, STEMLEAF 64, NPPLOT 46, NONE 2). The
+# full forms are the control that makes that zero a real zero, so this is a
+# latent defect. Fixed regardless: a prefix match here can only turn a plot ON.
+#
+# Three characters is the floor -- below every documented SPSS minimum for these
+# keywords, and short enough that an ambiguous "/HI" is still refused.
+.spss_kw_pattern <- function(word, min_prefix = 3L) {
+  n <- nchar(word)
+  if (n <= min_prefix) return(word)
+  paste0("(?:", paste(substr(rep(word, n - min_prefix + 1L), 1L,
+                             seq.int(n, min_prefix)), collapse = "|"), ")")
+}
+
+.spss_sub_has <- function(txt, sub, kw) {
+  # `/\\s*` here, not `/`: SPSS permits blanks around a slash, and until
+  # 2026-09-09 `.spss_has_sub` accepted `/ PLOT` while this function could not
+  # SLICE it -- so the subcommand was found and then read as empty, and every
+  # EXAMINE plot switched off. Found by consult seat `sol`; reproduced against
+  # the no-blank control, which gave hist = TRUE for the same command.
+  m <- regmatches(txt, gregexpr(paste0("/\\s*", .spss_kw_pattern(sub), "[^/]*"),
+                                txt, perl = TRUE))[[1]]
+  if (!length(m)) return(FALSE)
+  # A parenthesised token is a user-supplied NAME, not a keyword: in
+  # `/SAVE=PRED(COOK)` the COOK is the name of the saved predicted-value column,
+  # and reading it as the COOK statistic put a Cook's distance table in the
+  # report that SPSS never produced. Also `sol`, 2026-09-09, reproduced against
+  # a genuine `/SAVE=COOK` control. Statistic keywords always sit OUTSIDE the
+  # parentheses, so dropping their contents cannot lose a real request.
+  m <- gsub("\\([^)]*\\)", " ", m, perl = TRUE)
+  any(grepl(paste0("\\b", .spss_kw_pattern(kw), "\\b"), m, perl = TRUE))
+}
+
+.spss_has_sub <- function(txt, sub) {
+  grepl(paste0("/\\s*", .spss_kw_pattern(sub), "\\b"), txt, perl = TRUE)
+}
+
+# FREQUENCIES charts. SPSS draws none unless asked: measured over the 287-file
+# .sps corpus, 462 FREQUENCIES blocks carried 30 /HISTOGRAM, 2 /BARCHART and
+# 4 /PIECHART. jmv::descriptives has no `pie` argument (checked against
+# formals()), so a pie chart is recorded as unconverted rather than silently
+# redrawn as a bar.
+.spss_frequencies_charts <- function(raw) {
+  txt <- .spss_sub_text(raw)
+  list(
+    hist = .spss_has_sub(txt, "HISTOGRAM"),
+    bar  = .spss_has_sub(txt, "BARCHART"),
+    pie  = .spss_has_sub(txt, "PIECHART"),
+    # SPSS's NORMAL superimposes a curve FITTED from the mean and SD. jmv's
+    # `dens` is a KERNEL density, a different estimator -- substituting it would
+    # be pretending, so the request is recorded and `dens` stays FALSE. Found by
+    # consult seat `sol`, 2026-09-09.
+    normal = .spss_sub_has(txt, "HISTOGRAM", "NORMAL")
+  )
+}
+
+# EXAMINE plots. Unlike CORRELATIONS and T-TEST this command really does have a
+# /PLOT subcommand, and its SPSS default is not empty: with /PLOT absent SPSS
+# prints BOXPLOT and STEMLEAF. jmv has no stem-and-leaf, so `box` alone carries
+# the default. SPSS has no density curve anywhere in EXAMINE, so `dens` is only
+# ever FALSE.
+.spss_examine_plots <- function(raw) {
+  txt <- .spss_sub_text(raw)
+  if (!.spss_has_sub(txt, "PLOT")) {
+    # The default is BOXPLOT *and* STEMLEAF. We keep the boxplot; the
+    # stem-and-leaf has no jmv equivalent, so it is recorded rather than
+    # dropped. Found by consult seat `sol`, 2026-09-09.
+    return(list(hist = FALSE, dens = FALSE, box = TRUE, qq = FALSE,
+                unconverted = "STEMLEAF (SPSS default)"))
+  }
+  if (.spss_sub_has(txt, "PLOT", "NONE")) {
+    return(list(hist = FALSE, dens = FALSE, box = FALSE, qq = FALSE))
+  }
+  all_p <- .spss_sub_has(txt, "PLOT", "ALL")
+  list(
+    hist = all_p || .spss_sub_has(txt, "PLOT", "HISTOGRAM"),
+    dens = FALSE,
+    box  = all_p || .spss_sub_has(txt, "PLOT", "BOXPLOT"),
+    qq   = all_p || .spss_sub_has(txt, "PLOT", "NPPLOT"),
+    # jmv draws neither of these. They are RECORDED rather than dropped, and
+    # never approximated by a different plot. STEMLEAF appears 64 times inside
+    # EXAMINE's /PLOT in the 287-file corpus, so this is an active omission and
+    # not a hypothetical one. Found by consult seat `sonnet`, 2026-09-09.
+    unconverted = c(
+      if (all_p || .spss_sub_has(txt, "PLOT", "STEMLEAF")) "STEMLEAF",
+      if (all_p || .spss_sub_has(txt, "PLOT", "SPREADLEVEL")) "SPREADLEVEL",
+      # SPSS NPPLOT draws a normal AND a detrended Q-Q plot;
+      # jmv::descriptives(qq = TRUE) draws one ordinary Q-Q via stat_qq, so the
+      # detrended one has no equivalent. Found by consult seat `sol`, 2026-09-09.
+      if (all_p || .spss_sub_has(txt, "PLOT", "NPPLOT")) "the detrended Q-Q plot"
+    )
+  )
+}
+
+.spss_regression_options <- function(raw) {
+  txt <- .spss_sub_text(raw)
+  sub_has <- function(sub, kw) .spss_sub_has(txt, sub, kw)
+  stat_all <- sub_has("STATISTICS", "ALL")
+  res_all  <- sub_has("RESIDUALS", "ALL") || sub_has("RESIDUALS", "DEFAULTS")
+  list(
+    aic      = stat_all,
+    bic      = stat_all,
+    rmse     = stat_all,
+    ci       = stat_all || sub_has("STATISTICS", "CI"),
+    # SPSS prints no confidence interval for the STANDARDIZED coefficient, so
+    # this one needs an explicit ALL and is not implied by CI.
+    ciStdEst = stat_all,
+    collin   = stat_all || sub_has("STATISTICS", "COLLIN") || sub_has("STATISTICS", "TOL"),
+    # Cook's distance reaches SPSS output through /SAVE, not /STATISTICS.
+    cooks    = sub_has("SAVE", "COOK"),
+    durbin   = sub_has("RESIDUALS", "DURBIN"),
+    norm     = res_all || sub_has("RESIDUALS", "HISTOGRAM") || sub_has("RESIDUALS", "NORMPROB"),
+    qqPlot   = res_all || sub_has("RESIDUALS", "NORMPROB"),
+    resPlots = grepl("/SCATTERPLOT", txt, fixed = TRUE)
+  )
+}
+
 convert_regression <- function(parsed, sav_info) {
   dv <- parsed$variables$dependent
   ivs <- parsed$variables$independent
@@ -1013,6 +1473,22 @@ convert_regression <- function(parsed, sav_info) {
   # tables: SPSS's ANOVA df only lets a reader RECONSTRUCT N; printing it
   # directly lets them verify missing-data handling matched SPSS.
   ivs_vec <- paste0('"', ivs, '"', collapse = ", ")
+
+  # See .spss_regression_options() above for why each of these is gated and why
+  # six of them are not. The order is fixed so the emitted call always ends on
+  # `resPlots`, which keeps the jmv call the LAST expression in the chunk --
+  # s2r_render_tables() renders the chunk's value, and anything after the call
+  # silently produces no tables at all.
+  .ropt <- .spss_regression_options(parsed$raw)
+  .opts <- c(r = TRUE, r2 = TRUE, r2Adj = TRUE,
+             aic = .ropt$aic, bic = .ropt$bic, rmse = .ropt$rmse,
+             modelTest = TRUE, anova = TRUE,
+             ci = .ropt$ci, stdEst = TRUE, ciStdEst = .ropt$ciStdEst,
+             collin = .ropt$collin, cooks = .ropt$cooks, durbin = .ropt$durbin,
+             norm = .ropt$norm, qqPlot = .ropt$qqPlot, resPlots = .ropt$resPlots)
+  opts_str <- paste0("  ", names(.opts), " = ",
+                     ifelse(.opts, "TRUE", "FALSE"), collapse = ",\n")
+
   r_code <- glue::glue('
 {{
   cat("**N analysed (listwise):**",
@@ -1024,23 +1500,7 @@ convert_regression <- function(parsed, sav_info) {
   covs = {covs_str},
   blocks = {blocks_str},
   refLevels = list(),
-  r = TRUE,
-  r2 = TRUE,
-  r2Adj = TRUE,
-  aic = TRUE,
-  bic = TRUE,
-  rmse = TRUE,
-  modelTest = TRUE,
-  anova = TRUE,
-  ci = TRUE,
-  stdEst = TRUE,
-  ciStdEst = TRUE,
-  collin = TRUE,
-  cooks = TRUE,
-  durbin = TRUE,
-  norm = TRUE,
-  qqPlot = TRUE,
-  resPlots = TRUE
+{opts_str}
 )
 }}')
 
@@ -1189,6 +1649,11 @@ convert_examine <- function(parsed, sav_info) {
                 packages = character(), analysis_type = "Explore"))
   }
   vars_str <- make_vars_str(dvs)
+  ex_plots <- .spss_examine_plots(parsed$raw)
+  ex_note <- if (length(ex_plots$unconverted)) {
+    paste0("\n# NOTE: /PLOT ", paste(ex_plots$unconverted, collapse = " "),
+           " requested; jmv has no such plot, so none is drawn.")
+  } else ""
   split_line <- if (length(factors) > 0) {
     paste0("\n  splitBy = ", make_vars_str(factors), ",")
   } else ""
@@ -1207,11 +1672,11 @@ jmv::descriptives(
   skew = TRUE,
   kurt = TRUE,
   sw = TRUE,
-  hist = TRUE,
-  dens = TRUE,
-  box = TRUE,
-  qq = TRUE
-)')
+  hist = {toupper(ex_plots$hist)},
+  dens = {toupper(ex_plots$dens)},
+  box = {toupper(ex_plots$box)},
+  qq = {toupper(ex_plots$qq)}
+){ex_note}')
 
   list(r_code = r_code, packages = "jmv",
        analysis_type = "Explore", variables = c(dvs, factors))
@@ -2388,6 +2853,56 @@ convert_spss_expression <- function(expr) {
   #     the IBM SPSS Statistics System Variables reference); nothing to handle.
   r_expr <- gsub("\\$CASENUM\\b", "dplyr::row_number()", r_expr, ignore.case = TRUE, perl = TRUE)
 
+  # DATEDIFF(end, start, 'unit') -> lubridate::time_length(interval(start, end), unit)
+  # SPSS units: years, quarters, months, weeks, days, hours, minutes, seconds.
+  # lubridate::time_length() expects singular forms. We normalize plural -> singular
+  # and pass through any unit verbatim (lubridate handles many forms).
+  r_expr <- gsub(
+    "\\bDATEDIFF\\s*\\(\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*['\"]([A-Za-z]+)['\"]\\s*\\)",
+    "as.numeric(lubridate::time_length(lubridate::interval(\\2, \\1), unit = \"\\L\\3\"))",
+    r_expr, ignore.case = TRUE, perl = TRUE
+  )
+  # Two-argument DATEDIFF(end, start) defaults to days in SPSS
+  r_expr <- gsub(
+    "\\bDATEDIFF\\s*\\(\\s*([^,]+?)\\s*,\\s*([^,)]+?)\\s*\\)",
+    "as.numeric(lubridate::time_length(lubridate::interval(\\2, \\1), unit = \"days\"))",
+    r_expr, ignore.case = TRUE, perl = TRUE
+  )
+
+
+  # ---- Protect string literals from every rewrite below (measured 2026-09-09) ----
+  #
+  # Every rule after this point is a blind `gsub` over the whole expression, and
+  # the worst of them is the "normalise variable names to UPPERCASE" pass near
+  # the end. None of them knew what a quoted string was, so they rewrote the
+  # INSIDE of one:
+  #
+  #   trialcode NE 'AppAvoidTraining'  ->  TRIALCODE != 'APPAVOIDTRAINING'
+  #   cond = 'Not Applicable'          ->  COND == '! APPLICABLE'
+  #   cond = 'Netherlands OR Belgium'  ->  COND == 'NETHERLANDS | BELGIUM'
+  #
+  # SPSS string comparison is CASE-SENSITIVE, so the first of those matches no
+  # row at all and the `SELECT IF` keeps every case SPSS dropped: no error, no
+  # warning, a plausible mean over the wrong sample. 25 of the 190 corpus .sps
+  # contain at least one altered literal. (None can DEMONSTRATE a wrong number,
+  # because the only two that ship data are source defects -- gta94's
+  # `Fluently` is undefined in its .sav and 3apxv's DataQuest.sav has no `ID`
+  # column -- but the live service converts the researcher's own data, where
+  # the variable does exist.)
+  #
+  # Masked here, restored at the very end. The token is already upper case, has
+  # no `$`/`#`/`@`, and is not one of the function names restored below, so it
+  # passes through every intervening rule untouched. DATEDIFF is lifted above
+  # this point because it is the one rule that must READ a literal (its quoted
+  # unit argument).
+  .s2r_lit_m <- gregexpr("'[^']*'|\"[^\"]*\"", r_expr, perl = TRUE)
+  .s2r_lits <- regmatches(r_expr, .s2r_lit_m)[[1]]
+  if (length(.s2r_lits)) {
+    regmatches(r_expr, .s2r_lit_m) <-
+      list(paste0("S2RSTRLIT", seq_along(.s2r_lits), "ZZ"))
+  }
+
+
   # Handle SPSS not-equal operators BEFORE equality conversion
   # (otherwise ~= becomes ~== and <> becomes <>= etc.)
   r_expr <- gsub("~=", "!=", r_expr)
@@ -2415,22 +2930,6 @@ convert_spss_expression <- function(expr) {
   # converts to ~is.na, leaving the ~ in place).
   r_expr <- gsub("~\\s*MISSING\\s*\\(([^)]+)\\)", "!is.na(\\1)", r_expr, ignore.case = TRUE, perl = TRUE)
   r_expr <- gsub("~\\s*SYSMIS\\s*\\(([^)]+)\\)", "!is.na(\\1)", r_expr, ignore.case = TRUE, perl = TRUE)
-
-  # DATEDIFF(end, start, 'unit') -> lubridate::time_length(interval(start, end), unit)
-  # SPSS units: years, quarters, months, weeks, days, hours, minutes, seconds.
-  # lubridate::time_length() expects singular forms. We normalize plural -> singular
-  # and pass through any unit verbatim (lubridate handles many forms).
-  r_expr <- gsub(
-    "\\bDATEDIFF\\s*\\(\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*['\"]([A-Za-z]+)['\"]\\s*\\)",
-    "as.numeric(lubridate::time_length(lubridate::interval(\\2, \\1), unit = \"\\3\"))",
-    r_expr, ignore.case = TRUE, perl = TRUE
-  )
-  # Two-argument DATEDIFF(end, start) defaults to days in SPSS
-  r_expr <- gsub(
-    "\\bDATEDIFF\\s*\\(\\s*([^,]+?)\\s*,\\s*([^,)]+?)\\s*\\)",
-    "as.numeric(lubridate::time_length(lubridate::interval(\\2, \\1), unit = \"days\"))",
-    r_expr, ignore.case = TRUE, perl = TRUE
-  )
 
   # NMISS(a, b, ...) -> rowSums(is.na(cbind(a, b, ...)))
   r_expr <- gsub("\\bNMISS\\s*\\(([^)]+)\\)", "rowSums(is.na(cbind(\\1)))", r_expr, ignore.case = TRUE)
@@ -2498,13 +2997,20 @@ convert_spss_expression <- function(expr) {
   r_expr <- gsub("\\bAS\\.NUMERIC\\b", "as.numeric", r_expr)
   r_expr <- gsub("\\bLUBRIDATE::TIME_LENGTH\\b", "lubridate::time_length", r_expr)
   r_expr <- gsub("\\bLUBRIDATE::INTERVAL\\b", "lubridate::interval", r_expr)
-  # Lowercase any unit = "UPPER" -> unit = "lower" inside lubridate calls
-  unit_matches <- regmatches(r_expr, gregexpr("UNIT = \"[A-Z]+\"", r_expr))[[1]]
-  for (m in unique(unit_matches)) {
-    inner <- sub('^UNIT = "', "", m)
-    inner <- sub('"$', "", inner)
-    r_expr <- gsub(m, paste0('unit = "', tolower(inner), '"'), r_expr, fixed = TRUE)
-  }
+  # DATEDIFF now runs ABOVE the string-literal mask (it is the one rule that has
+  # to READ a literal -- its quoted unit), so its emitted `unit = "years"` is
+  # itself carried through the rules below: the literal is protected, but the
+  # argument NAME is upper-cased and its `=` is doubled. Restore both, the same
+  # way the lubridate function names above are restored.
+  #
+  # The old post-hoc `tolower()` sweep that used to live here is gone: the unit
+  # is now lower-cased at translation time with PCRE `\L`, because with literals
+  # protected there is no longer an upper-cased unit for a sweep to find.
+  # The trailing quote is NOT part of the match: at this point the unit literal
+  # has been replaced by a bare mask token (the mask consumes the quotes too),
+  # so `UNIT == "` would match nothing. Anchored on the preceding comma so it
+  # cannot fire on a researcher's own variable called UNIT.
+  r_expr <- gsub(", UNIT == ", ", unit = ", r_expr, fixed = TRUE)
   r_expr <- gsub("\\bROWMEANS\\b", "rowMeans", r_expr)
   r_expr <- gsub("\\bROWSUMS\\b", "rowSums", r_expr)
   r_expr <- gsub("\\bCBIND\\b", "cbind", r_expr)
@@ -2556,6 +3062,16 @@ convert_spss_expression <- function(expr) {
     "([A-Za-z_][A-Za-z0-9_.]*)[$#@]([A-Za-z0-9_])",
     "\\1.\\2", r_expr, perl = TRUE
   )
+
+  # Restore the protected string literals, byte for byte. Done last so no rule
+  # above can see -- and therefore cannot rewrite -- their contents. `fixed`
+  # matching, and the trailing `ZZ` keeps token 1 from matching inside token 10.
+  if (length(.s2r_lits)) {
+    for (.i in seq_along(.s2r_lits)) {
+      r_expr <- gsub(paste0("S2RSTRLIT", .i, "ZZ"), .s2r_lits[[.i]],
+                     r_expr, fixed = TRUE)
+    }
+  }
 
   r_expr
 }

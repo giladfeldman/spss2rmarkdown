@@ -128,6 +128,106 @@ s2r_render_model <- function(model) {
   paste0(code, "\n  NULL")
 }
 
+# Which of an analysis's requested variables are absent from `data`?
+#
+# jmv reports a missing variable with a message that names NOTHING:
+#
+#   'names' attribute [49] must be the same length as the vector [0]
+#
+# where 49 is ncol(data). Reproduced 2026-09-05 against jmv 2.7.7 / R 4.4.0
+# with round-3-spss uh3n8 "Syntax 7_building variable indexes.sps" +
+# "Data 1_Ground file_Complete dataset all years.sav"; the two-sided control
+# (the same call on a column that IS present) succeeds, so jmv is healthy and
+# the defect is purely the message. Relayed verbatim by the chunk's tryCatch it
+# tells the researcher nothing, and it defeats any automated comparison against
+# the original SPSS output, which can only classify a failure (the researcher's
+# syntax was broken vs. the conversion was) when the error names a variable that
+# can be looked up in that output.
+#
+# So the analysis chunk pre-flights its variables and raises a NAMED error
+# instead. This does NOT repair the researcher's syntax -- a missing variable
+# is still an error, just a legible one.
+#
+# This is a RENDER-time helper, deparsed into the generated .Rmd by
+# .s2r_helpers_chunk() below, so it must stay dependency-free. `data` is NULL
+# on the no-.sav path, where the existing data guard already reports the cause;
+# returning nothing there keeps this from firing a second, misleading error.
+.s2r_missing_vars <- function(data, vars) {
+  vars <- as.character(vars)
+  vars <- unique(vars[!is.na(vars) & nzchar(vars)])
+  if (!length(vars)) return(character(0))
+  if (is.null(data) || !is.data.frame(data)) return(character(0))
+  vars[!(vars %in% names(data))]
+}
+
+# Name the case-only near miss, because it means WE failed to normalise a name.
+#
+# The comparison above is deliberately case-SENSITIVE: the converter uppercases
+# every SPSS name and the loader uppercases every column, so the two agree by
+# construction. When they disagree only in case, the variable IS in the data and
+# the fault is ours -- a converter path that forgot to normalise. Reported as a
+# bare "not present in the dataset", that is indistinguishable from a genuinely
+# absent variable. Measured cost 2026-09-09: a sibling session lost ~40 minutes
+# to `variables not present in the dataset: 'meanbenevo'` when MEANBENEVO was
+# right there, because `with_vars` was missing from `var_name_keys`.
+#
+# This CANNOT fire in a healthy report: it needs a column that matches except in
+# case, which normalisation makes impossible. So it costs correct conversions
+# nothing and only ever annotates one of our own defects.
+#
+# The suggestion is deliberately NOT quoted. An automated comparison against the
+# original SPSS output extracts variable tokens from QUOTED names in a fired
+# error and judges the paragraph on all of them together, so a quoted suggestion
+# would inject a token that is not part of the researcher's request and could
+# flip that paragraph's verdict. Unquoted, it is legible to the reader and
+# invisible to the extractor.
+#
+# RENDER-time helper: deparsed into the generated .Rmd, so it must stay
+# dependency-free.
+.s2r_case_hint <- function(data, missing) {
+  if (!length(missing) || is.null(data) || !is.data.frame(data)) return("")
+  nms <- names(data)
+  hits <- vapply(missing, function(v) {
+    m <- nms[toupper(nms) == toupper(v)]
+    if (length(m)) m[[1]] else NA_character_
+  }, character(1))
+  keep <- !is.na(hits)
+  if (!any(keep)) return("")
+  paste0(" (case mismatch, not a missing variable: the dataset has ",
+         paste(hits[keep], collapse = ", "),
+         " -- the converter failed to normalise ",
+         paste(missing[keep], collapse = ", "), ")")
+}
+
+# Narrow a converter's declared `variables` to the ones its emitted code
+# actually references.
+#
+# MEASURED BEFORE THIS GUARD WAS WRITTEN, over all 190 corpus .sps files: of
+# 992 analyses, 945 declare `variables`, and 48 declared names never appear in
+# the emitted r_code at all -- parser artifacts from one malformed paired
+# T-TEST ("T.TEST", "X.PAIRED.", "PAIRS.CRAGUN_NRNS_RG"). Pre-flighting those
+# would abort analyses that currently run correctly, trading an illegible error
+# for a fabricated one.
+#
+# Intersecting is general and strictly correct: a variable the call never
+# mentions cannot be why the call failed. Word boundaries are hand-rolled
+# because SPSS names contain "." (so \b would split INT04.A), and every
+# non-alphanumeric character is escaped before it reaches the regex.
+#
+# Runs at GENERATION time, so it is package-internal and not deparsed into the
+# emitted .Rmd.
+.s2r_preflight_vars <- function(r_code, vars) {
+  vars <- as.character(vars)
+  vars <- unique(vars[!is.na(vars) & nzchar(vars)])
+  if (!length(vars)) return(character(0))
+  code <- paste(as.character(r_code), collapse = "\n")
+  keep <- vapply(vars, function(nm) {
+    esc <- gsub("([^A-Za-z0-9_])", "\\\\\\1", nm)
+    grepl(paste0("(^|[^A-Za-z0-9_.])", esc, "($|[^A-Za-z0-9_.])"), code, perl = TRUE)
+  }, logical(1), USE.NAMES = FALSE)
+  vars[keep]
+}
+
 # Render an analysis-chunk error into a single, always-non-empty report line.
 #
 # The old handler did `cat("**Analysis error:**", e$message, "\n")`, which
@@ -167,7 +267,7 @@ s2r_render_model <- function(model) {
 .s2r_helpers_chunk <- function() {
   defs <- vapply(
     c(".s2r_table_to_html", "s2r_render_tables", "s2r_render_model",
-      ".s2r_format_error"),
+      ".s2r_format_error", ".s2r_missing_vars", ".s2r_case_hint"),
     function(nm) paste0(nm, " <- ", paste(deparse(get(nm)), collapse = "\n")),
     character(1)
   )
@@ -215,6 +315,24 @@ generate_rmd <- function(sav_data, sav_path, parsed_syntax, converted_code,
   include_original <- options$include_original %||% TRUE
   include_effect_sizes <- options$include_effect_sizes %||% TRUE
   table_style <- options$table_style %||% "apa7"
+
+  # ---- Does this script run against MORE THAN ONE dataset? ----
+  # annotate_dataset_state() stamped the ACTIVE .sav on every parsed command and
+  # convert_all_commands() carried it here. When a script switches datasets with
+  # GET FILE / DATASET ACTIVATE, running everything against a single primary
+  # produces plausible numbers from the wrong wave. A single-dataset script has
+  # 0 or 1 distinct key and takes exactly the old path, byte for byte.
+  .ds_key_of <- function(x) {
+    k <- x$dataset_key
+    if (is.null(k) || length(k) != 1L || is.na(k) || !nzchar(k)) NA_character_ else as.character(k)
+  }
+  ds_keys_all <- vapply(converted_code, .ds_key_of, character(1))
+  ds_distinct <- unique(ds_keys_all[!is.na(ds_keys_all)])
+  multi_dataset <- length(ds_distinct) > 1L
+  # A literal R string for one key, or NA_character_ for "the primary dataset".
+  .ds_lit <- function(k) if (is.na(k)) "NA_character_" else
+    paste0('"', gsub('"', '\\\\"', k), '"')
+
 
   if (is.null(base_name)) {
     base_name <- tools::file_path_sans_ext(basename(sav_path))
@@ -356,7 +474,20 @@ data <- NULL
   # all there is nothing to verify against, so the merge proceeds under the
   # documented row-order precondition (also called out in a NOTE) rather than
   # refusing to merge files that never carried an identifier to begin with.
-  secondary_basenames <- unique(secondary_sav_files[nzchar(secondary_sav_files)])
+  # NOT when the script switches datasets explicitly. Positionally cbind-ing
+  # other uploaded .sav files into the primary is a guess made for scripts that
+  # reference variables spanning several files with no MATCH FILES. A script
+  # that says GET FILE / DATASET ACTIVATE is not guessing -- it states which
+  # dataset each command runs against -- and doing both means a wave-keyed
+  # analysis could succeed on a column that its own wave does not contain,
+  # borrowed from a same-N sibling. Raised by the Grok 4.6 seat, 2026-09-09.
+  #
+  # Measured on the corpus item this feature targets, so the change is inert
+  # there rather than untested: the 2015 and 2017 waves of uh3n8 have IDENTICAL
+  # 59-column sets (setdiff empty in BOTH directions), so the merge could add
+  # nothing, and the 2013 wave is skipped anyway on its row count (1828 vs 287).
+  secondary_basenames <- if (multi_dataset) character(0) else
+    unique(secondary_sav_files[nzchar(secondary_sav_files)])
   secondary_basenames <- secondary_basenames[
     tolower(tools::file_ext(secondary_basenames)) == "sav" &
     basename(secondary_basenames) != sav_basename]
@@ -410,6 +541,79 @@ for (.sec in {vec_lit}) {{
     secondary_merge_block <- ""
   }
 
+  # The dataset store, emitted ONLY for a multi-dataset script. Empty otherwise,
+  # so a normal single-dataset report is byte-identical to before.
+  if (multi_dataset) {
+    ds_list_comment <- paste0("#   - ", ds_distinct, collapse = "
+")
+    dataset_store_block <- glue::glue(paste(c(
+      r"()",
+      r"(# ---- Several datasets are in play; switch between them the way SPSS does ----)",
+      r"(#)",
+      r"(# This syntax opens more than one .sav (GET FILE / DATASET ACTIVATE) and runs)",
+      r"(# different commands against different ones. Every analysis and transformation)",
+      r"(# below activates the dataset that was ACTIVE at that point in the original)",
+      r"(# syntax, so a command is never silently run against the wrong file.)",
+      r"(#)",
+      r"(# Datasets used by this script:)",
+      r"({ds_list_comment})",
+      r"(.s2r_ds <- new.env(parent = emptyenv()))",
+      r"(.s2r_ds[[".primary"]] <- data)",
+      r"(.s2r_ds[[toupper("{sav_basename}")]] <- data)",
+      r"()",
+      r"(# Return a named dataset, loading it on first use and caching it. A dataset the)",
+      r"(# job did not receive is a hard, NAMED error rather than a silent fall back to)",
+      r"(# the primary: falling back would print entirely plausible numbers computed)",
+      r"(# from the wrong wave, which is the failure this block exists to remove.)",
+      r"(.s2r_activate <- function(key) {{)",
+      r"(  if (is.null(key) || length(key) != 1L || is.na(key) || !nzchar(key)))",
+      r"(    return(.s2r_ds[[".primary"]]))",
+      r"(  # DATASET COPY makes an INDEPENDENT duplicate whose contents depend on)",
+      r"(  # the source's state at that point in the syntax -- which the)",
+      r"(  # transformations-before-analyses emission order does not preserve. We)",
+      r"(  # refuse it by name rather than aliasing the source and printing a)",
+      r"(  # plausible wrong number.)",
+      r"(  if (startsWith(key, "#copy-of#")) {{)",
+      r"(    stop("this syntax analyses a DATASET COPY of '", sub("^#copy-of#", "", key),)",
+      r"(         "', which this converter cannot reproduce faithfully; the copy and ",)",
+      r"(         "the original would share one set of values here", call. = FALSE))",
+      r"(  }})",
+      r"(  k <- toupper(key))",
+      r"(  if (!is.null(.s2r_ds[[k]])) return(.s2r_ds[[k]]))",
+      r"(  # A repeated GET FILE of the same file is a FRESH read in SPSS, so each)",
+      r"(  # GET gets its own instance key ("w.sav", "w.sav#2", ...). Strip the)",
+      r"(  # suffix to find the file; the instances then keep separate state.)",
+      r"(  key <- sub("#[0-9]+$", "", key))",
+      r"(  if (!file.exists(key)) {{)",
+      r"(    stop("the syntax switches to dataset '", key, "', which was not provided ",)",
+      r"(         "with this conversion; upload it alongside the syntax to reproduce ",)",
+      r"(         "these analyses", call. = FALSE))",
+      r"(  }})",
+      r"(  d <- haven::read_sav(key))",
+      r"(  names(d) <- normalize_spss_names(names(d)))",
+      r"(  d <- clean_data(d))",
+      r"(  .s2r_ds[[k]] <- d)",
+      r"(  d)",
+      r"(}})",
+      r"()",
+      r"(# Write a transformed frame back to its own slot, so later commands on the SAME)",
+      r"(# dataset see the new columns while the other datasets stay untouched. This is)",
+      r"(# what preserves the MEANING of the original command order even though every)",
+      r"(# transformation is emitted before every analysis: each wave mutates only)",
+      r"(# itself, so the same variable name recomputed with a different formula per)",
+      r"(# wave never collides.)",
+      r"(.s2r_commit <- function(key, value) {{)",
+      r"(  k <- if (is.null(key) || length(key) != 1L || is.na(key) || !nzchar(key)))",
+      r"(         ".primary" else toupper(key))",
+      r"(  .s2r_ds[[k]] <- value)",
+      r"(  invisible(value))",
+      r"(}})",
+      NULL), collapse = "
+"), .trim = FALSE)
+  } else {
+    dataset_store_block <- ""
+  }
+
   data_section <- glue::glue('
 ## Data Overview
 
@@ -458,6 +662,7 @@ clean_data <- function(d) {{
 }}
 
 data <- clean_data(data)
+{dataset_store_block}
 
 cat("**Variables:**", ncol(data), "\\n\\n")
 cat("**Observations:**", nrow(data), "\\n\\n")
@@ -494,14 +699,78 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
 ```
 '
 
+  # ---- Merge commands: name them before they are dropped ----
+  # MATCH FILES / ADD FILES / UPDATE are in SKIP_COMMANDS, so the filter below
+  # removes them along with genuine metadata -- and until now not even the
+  # explanatory comment survived. A dropped ADD FILES that should have stacked
+  # 150 + 130 rows leaves the report computing on 150: no error, no warning, a
+  # plausible mean from a partial sample. That is the worst class of defect we
+  # have, because nothing looks wrong.
+  #
+  # We do NOT attempt the merge. Measured 2026-09-09 over all 190 corpus .sps:
+  # 12 use these commands, with 33 non-active `/FILE=` operands between them,
+  # and ZERO of the 33 exist on disk -- 9 are in-session SPSS dataset names
+  # (`DataSet2`) that were never files, and 24 are absolute paths on the
+  # researcher's own machine (`H:/temp/...`). The data is genuinely unavailable,
+  # so naming the loss plainly IS the fix, not a fallback for one.
+  #
+  # Keyed off the command type, never off a filename or dataset name, so it
+  # covers every current and future merging command in the set.
+  # Driven from PARSED commands, not from converted ones. A merge is dropped by
+  # more than one route: SKIP_COMMANDS is the common one, but a merge inside a
+  # DEFINE macro body is discarded earlier still, at the macro boundary, and
+  # never reaches `converted_code` at all. Measured on
+  # `osf-round3/2twf5/sample_analysis_macros.sps`: `match files` at line 145 sits
+  # inside `define !stat_med_parallel` (96-162), the macro IS invoked at line 169
+  # so SPSS really does perform that merge, and a converted_code-driven check
+  # reported ZERO notes for it. Reading the parsed commands catches every route.
+  #
+  # This can over-report a merge inside a macro that is never invoked. That is
+  # the safe direction -- a warning about a merge we did not perform -- and
+  # detecting invocation reliably would mean expanding macros, which we do not do.
+  merge_notes <- list()
+  MERGE_COMMANDS <- c("MATCH FILES", "ADD FILES", "UPDATE")
+  for (pc in parsed_syntax) {
+    ct <- toupper(trimws(as.character(pc$command_type %||% "")))
+    if (!(ct %in% MERGE_COMMANDS)) next
+    raw <- as.character(pc$raw %||% "")
+    # The `/FILE=` operands say WHAT was not merged. `*` is the active dataset
+    # and is not a missing source, so it is dropped from the list.
+    ops <- regmatches(raw, gregexpr("(?i)/\\s*FILE\\s*=\\s*('[^']*'|\"[^\"]*\"|\\S+)",
+                                    raw, perl = TRUE))[[1]]
+    ops <- sub("(?i)^/\\s*FILE\\s*=\\s*", "", ops, perl = TRUE)
+    ops <- gsub("^['\"]|['\"]$", "", ops)
+    ops <- ops[nzchar(ops) & ops != "*"]
+    sources <- if (length(ops)) paste(ops, collapse = ", ") else "an unnamed source"
+    merge_notes[[length(merge_notes) + 1L]] <- list(
+      level = "error",
+      message = paste0(
+        ct, " was NOT performed: the data it merges from (", sources,
+        ") is not available to this conversion, so the rows or columns it ",
+        "would have added are missing. Every result below is computed on the ",
+        "unmerged dataset -- the row count, and any statistic that depends on ",
+        "it, may not match the original analysis."))
+  }
+
   # ---- Separate transformations from analyses ----
   # Filter out skipped commands (metadata) and empty results
   converted_code <- converted_code[!sapply(converted_code, function(x) {
     isTRUE(x$skip) || is.null(x$r_code) || nchar(trimws(x$r_code)) == 0
   })]
 
+  # Guard against an all-skipped script: `sapply(list(), fn)` returns a LIST,
+  # and `x[list()]` raises "invalid subscript type 'list'". A .sps consisting
+  # only of metadata and merge commands filters to length 0 here and crashed
+  # the generator outright. The same guard already existed further down for
+  # `analyses` alone; it was missing at this split. Found 2026-09-09 by the
+  # C-0001 regression test, which is exactly that shape.
+  if (length(converted_code) == 0) {
+    transformations <- list()
+    analyses <- list()
+  } else {
   transformations <- converted_code[sapply(converted_code, function(x) isTRUE(x$is_transformation))]
   analyses <- converted_code[!sapply(converted_code, function(x) isTRUE(x$is_transformation))]
+  }
 
   # Filter out pure EXECUTE from transformations (they add noise)
   transformations <- transformations[!sapply(transformations, function(x) {
@@ -573,12 +842,32 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
       # `<pre><code>## **Transformation N failed:** ...`. This shape
       # matches the pre-coalesce output and is not flagged by the
       # heuristic verifier as a runtime error marker.
+      # With several datasets in play, a transformation must run against -- and
+      # write back to -- the dataset that was ACTIVE at that point in the
+      # syntax. The activate/commit pair is what makes this survive the
+      # transformations-then-analyses reordering below: each wave's COMPUTEs
+      # mutate their OWN stored frame, so the analyses still see them. It is
+      # also why the same variable name recomputed with a DIFFERENT formula per
+      # wave (Syntax 7 does exactly this for risk01_prep2, intcom and risk_per)
+      # does not collide.
+      ds_pre <- if (multi_dataset)
+        paste0("data <- .s2r_activate(", .ds_lit(.ds_key_of(conv)), ")
+") else ""
+      ds_post <- if (multi_dataset)
+        paste0(".s2r_commit(", .ds_lit(.ds_key_of(conv)), ", data)
+") else ""
       paste0(
-        "tryCatch({\n",
+        "tryCatch({
+",
+        ds_pre,
         conv$r_code,
-        "\n}, error = function(e) {\n",
+        "
+", ds_post,
+        "}, error = function(e) {
+",
         "  cat(\"**Transformation ", i, " failed:**\", .s2r_format_error(e), \"\\n\")\n",
-        "})\n"
+        "})
+"
       )
     }, character(1))
 
@@ -669,6 +958,34 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
     # emission point so it covers every current and future stub converter.
     res_rhs <- .s2r_expression_safe_rcode(conv$r_code)
 
+    # Pre-flight the variables this analysis requests, so a missing one is
+    # reported BY NAME instead of through jmv's "'names' attribute [ncol] must
+    # be the same length as the vector [0]", which names nothing at all.
+    # Emitted at this single site for EVERY analysis, from the list the
+    # converter already declares -- never a per-file or per-variable case.
+    # Converters that declare no variables get `character(0)` and a no-op.
+    # The names are QUOTED so an automated comparison against the original SPSS
+    # output can extract them: such tooling looks for quoted tokens, and an
+    # unquoted list stays undecidable however readable it is to a person.
+    # A converter that already performs its own presence check on these
+    # variables sets `self_guards_variables` and owns the reporting; running
+    # the general pre-flight as well would report one condition twice, and the
+    # harder of the two reports would win.
+    preflight <- if (isTRUE(conv$self_guards_variables)) {
+      character(0)
+    } else {
+      .s2r_preflight_vars(conv$r_code, conv$variables)
+    }
+    vars_lit <- paste(deparse(preflight), collapse = "")
+
+    # Run this analysis against the dataset that was ACTIVE at this point in the
+    # syntax. Emitted BEFORE the missing-variable pre-flight, so the pre-flight
+    # checks the right frame -- otherwise every 2015-wave analysis would be
+    # pre-flighted against the 2013 columns and report the wrong names.
+    ds_activate <- if (multi_dataset)
+      paste0("  data <- .s2r_activate(", .ds_lit(.ds_key_of(conv)), ")
+") else ""
+
     glue::glue('
 ## Analysis {i}: {conv$analysis_type}
 
@@ -677,6 +994,12 @@ if (!exists("data") || !is.data.frame(data) || nrow(data) == 0) {
 ### R Code
 ```{{r analysis-{i}, results=\'asis\'}}
 tryCatch({{
+{ds_activate}  .miss <- .s2r_missing_vars(data, {vars_lit})
+  if (length(.miss) > 0) {{
+    stop("variables not present in the dataset: ",
+         paste0("\'", .miss, "\'", collapse = ", "),
+         .s2r_case_hint(data, .miss), call. = FALSE)
+  }}
   .res <- {res_rhs}
   s2r_render_tables(.res)
 }}, error = function(e) {{
@@ -713,7 +1036,10 @@ The following SPSS commands were not automatically converted and may need manual
   # content (caught by the 2026-08-04 Sonnet canary audit on Syntax_Hyp4).
   # Synthesize the explanatory note so the referenced section always exists
   # whenever the document points the reader at it.
-  effective_notes <- conversion_notes
+  # Merge commands dropped above are reported here, ahead of the caller's own
+  # notes: a silently unmerged dataset changes the numbers, so it outranks the
+  # path-resolution warnings that usually fill this table.
+  effective_notes <- c(merge_notes, conversion_notes)
   if (!has_sav && length(effective_notes) == 0) {
     effective_notes <- list(list(
       level = "warning",

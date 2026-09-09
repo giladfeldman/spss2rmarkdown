@@ -156,5 +156,7 @@ test_that("regression surfaces analysed N and still returns the jmv call", {
   expect_true(grepl("jmv::linReg", r$r_code, fixed = TRUE))
   # The braces block must RETURN the linReg result for s2r_render_tables():
   # the jmv call must be the last expression in the emitted code.
-  expect_true(grepl("resPlots = TRUE\\s*\\)\\s*\\}\\s*$", r$r_code))
+  # `resPlots` is last by construction; its VALUE is now gated on /SCATTERPLOT
+  # (2026-09-09, see test-regression-requested-options.R), so match either.
+  expect_true(grepl("resPlots = (TRUE|FALSE)\\s*\\)\\s*\\}\\s*$", r$r_code))
 })

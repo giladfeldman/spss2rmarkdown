@@ -11,7 +11,7 @@
 # GROUND TRUTH (the gate for this change — a converter must reproduce the
 # source tool's numbers, and an engine swap changes a published statistic):
 # generated with SPSS Statistics on 2026-08-04 from
-#   test-corpus/spss/osf-round3/fk5hu/Driver_Data.sav
+#   osf-round3/fk5hu/Driver_Data.sav
 # running the same FACTOR specification (PC extraction, MINEIGEN(1), VARIMAX,
 # /MISSING PAIRWISE) over IT71 IT77 IT76 IT33 IT92 IT88 IT79 IT40:
 #
@@ -30,9 +30,11 @@ SPSS_BARTLETT_DF <- 28
 SPSS_COMMUNALITIES <- c(.701, .722, .798, .603, .489, .712, .512, .309)
 FACTOR_VARS <- c("IT71", "IT77", "IT76", "IT33", "IT92", "IT88", "IT79", "IT40")
 
+# See test-corr-with-consult.R: the corpus is not shipped with the package.
 driver_sav <- function() {
-  p <- file.path("C:/Users/filin/Vibe/MetaScienceTools/2Rmarkdown",
-                 "test-corpus/spss/osf-round3/fk5hu/Driver_Data.sav")
+  root <- Sys.getenv("SPSS2R_SAV_CORPUS", unset = "")
+  if (!nzchar(root)) skip("sav corpus not reachable -- set SPSS2R_SAV_CORPUS to the .sav corpus root to run this anchor")
+  p <- file.path(root, "osf-round3", "fk5hu", "Driver_Data.sav")
   if (!file.exists(p)) skip("Driver_Data.sav not available in this checkout")
   p
 }

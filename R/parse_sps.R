@@ -73,6 +73,11 @@ parse_sps <- function(sps_path) {
   # filter wrap (instead of a global mutate that would persist across analyses).
   parsed <- annotate_filter_state(parsed)
 
+  # Stamp the ACTIVE dataset on each command so a script that switches between
+  # several .sav with GET FILE / DATASET ACTIVATE can be converted faithfully
+  # instead of being run entirely against one of them.
+  parsed <- annotate_dataset_state(parsed)
+
   parsed
 }
 
@@ -340,6 +345,140 @@ annotate_filter_state <- function(parsed) {
   parsed
 }
 
+
+#' The .sav a raw GET FILE / GET DATA / IMPORT command reads, or NA
+#'
+#' Basename only: the generated report resolves the file relative to the job
+#' directory at render time, exactly as the secondary-merge block already does.
+#'
+#' NB there is a second, path-preserving copy of this extraction in the worker
+#' (`.spss_extract_file_ref` in api/worker_plumber.R) which feeds the path
+#' RESOLUTION cascade. The two answer different questions and must not be merged
+#' -- but they must agree on which token is the filename, so change them
+#' together. perl = TRUE is required in both: in POSIX ERE the `[^'\"\\s]` class
+#' treats `\\s` as the literal characters '\\' and 's', so any filename
+#' containing the letter "s" fails to match.
+#' @keywords internal
+.spss_dataset_file_ref <- function(raw) {
+  raw <- raw %||% ""
+  m <- regmatches(raw, regexec(
+    "FILE\\s*=?\\s*([\"'])(.+?\\.[A-Za-z0-9]+)\\1",
+    raw, ignore.case = TRUE, perl = TRUE))[[1]]
+  if (length(m) >= 3 && nzchar(trimws(m[3])))
+    return(basename(gsub("\\\\", "/", trimws(m[3]))))
+  m <- regmatches(raw, regexec(
+    "FILE\\s*=?\\s*([^\"'\\s]+\\.[A-Za-z0-9]+)",
+    raw, ignore.case = TRUE, perl = TRUE))[[1]]
+  if (length(m) >= 2 && nzchar(trimws(m[2])))
+    return(basename(gsub("\\\\", "/", trimws(m[2]))))
+  NA_character_
+}
+
+#' Annotate every command with the dataset that is ACTIVE when it runs
+#'
+#' SPSS keeps several datasets open at once and runs each procedure against
+#' whichever one is active:
+#'
+#'   GET FILE='wave_2013.sav'.        -> that file becomes the active dataset
+#'   DATASET NAME DataSet4.           -> names the active dataset
+#'   DATASET ACTIVATE DataSet4.       -> makes that named dataset active again
+#'
+#' Four round-3-spss items in the uh3n8 deposit ("Syntax 2_counting missing",
+#' "Syntax 6_reliability measures", "Syntax 7_building variable indexes",
+#' "Syntax_ Exploring factor analysis ...") run the SAME analyses against 2-3
+#' waves this way. Their frozen golds name several input files each, so no
+#' single primary dataset can reproduce them: whichever wave we loaded, the
+#' other waves' commands ran against the wrong data and produced plausible
+#' numbers from it. That is the one outcome that must not stand.
+#'
+#' This pass records the ACTIVE FILE for every command so the generator can
+#' switch datasets instead of guessing one. Measured on "Syntax 6": the parser
+#' already emits all 3 GET FILE and all 13 DATASET commands, in order, so the
+#' information was present and merely unused.
+#'
+#' `dataset_key` is NA for every command before the first GET FILE (SPSS would
+#' be running against whatever the researcher had open, which the .sps does not
+#' record) and for a DATASET ACTIVATE naming a dataset we never saw opened. NA
+#' means "the primary dataset", which is exactly the old behaviour -- so a
+#' single-dataset script is annotated entirely NA and nothing about it changes.
+#' @keywords internal
+annotate_dataset_state <- function(parsed) {
+  active <- NA_character_
+  names_map <- list()   # DATASET NAME -> dataset instance key
+  seen <- list()        # file basename -> how many times it has been GET FILE'd
+
+  for (i in seq_along(parsed)) {
+    cmd <- parsed[[i]]
+    if (is.null(cmd)) next
+    ct  <- toupper(trimws(unname(cmd$command_type) %||% ""))
+    raw <- cmd$raw %||% ""
+
+    if (ct %in% c("GET FILE", "GET DATA", "IMPORT")) {
+      ref <- .spss_dataset_file_ref(raw)
+      # A GET whose file we cannot read is still a dataset SWITCH: staying on
+      # the previous file would silently attribute the new block's commands to
+      # the old wave. Move to "unknown" (NA) instead.
+      if (is.na(ref)) {
+        active <- NA_character_
+      } else {
+        # RE-READING THE SAME FILE IS A FRESH DATASET, not the one we already
+        # have. `GET FILE='w.sav'. COMPUTE age=99. GET FILE='w.sav'. DES age.`
+        # prints the ORIGINAL age in SPSS, because the second GET re-reads from
+        # disk and discards the computed column. Keying purely on the filename
+        # made the second block reuse the first block's MUTATED frame and print
+        # 99 -- a silently wrong number. So each GET of a file gets its own
+        # instance key: "w.sav", then "w.sav#2", ... The generated
+        # .s2r_activate() strips the "#n" suffix to find the file on disk, so
+        # every instance loads the same file but keeps its own state.
+        # (Raised by the Grok 4.6 seat, 2026-09-09.)
+        seen[[ref]] <- (seen[[ref]] %||% 0L) + 1L
+        active <- if (seen[[ref]] == 1L) ref else paste0(ref, "#", seen[[ref]])
+      }
+
+    } else if (ct == "DATASET") {
+      m <- regmatches(raw, regexec(
+        # No "." in the name class. SPSS dataset names are identifiers and
+        # cannot contain one, but the command TERMINATOR is a "." -- including
+        # it captured "DataSet4." from `DATASET ACTIVATE DataSet4.` while
+        # `DATASET NAME DataSet4 WINDOW=FRONT.` bound the bare "DataSet4", so
+        # the two never matched and every ACTIVATE silently resolved to NA.
+        "^\\s*DATASET\\s+(NAME|ACTIVATE|COPY|CLOSE|DECLARE)\\s*([A-Za-z0-9_$#@]*)",
+        raw, ignore.case = TRUE, perl = TRUE))[[1]]
+      if (length(m) >= 3) {
+        verb <- toupper(m[2]); nm <- toupper(m[3])
+        if (verb == "NAME" && nzchar(nm)) {
+          # Names the CURRENTLY active dataset. Recording NA would make a later
+          # ACTIVATE look resolvable when it is not, so only bind a real file.
+          if (!is.na(active)) names_map[[nm]] <- active
+        } else if (verb == "ACTIVATE" && nzchar(nm)) {
+          active <- if (!is.null(names_map[[nm]])) names_map[[nm]] else NA_character_
+        } else if (verb == "COPY" && nzchar(nm)) {
+          # DATASET COPY <new> makes an INDEPENDENT duplicate of the active
+          # dataset; the active dataset does not change. Binding the new name
+          # to the SAME key made the copy and the original share one frame, so
+          # a COMPUTE on either was visible to both -- SPSS keeps them separate
+          # (Grok 4.6 seat, 2026-09-09):
+          #
+          #   DATASET COPY B. / ACTIVATE B. / COMPUTE score=1.
+          #   ACTIVATE A.     / COMPUTE score=2. / ACTIVATE B. / DES score.
+          #   SPSS on B: 1.   Ours, when aliased: 2.
+          #
+          # Reproducing a true copy would need the source's state AT THIS POINT
+          # in the syntax, which the transformations-before-analyses emission
+          # order does not preserve. Rather than alias it and print a plausible
+          # wrong number, the name is bound to a sentinel that .s2r_activate()
+          # turns into a NAMED error. Measured: no corpus file both engages the
+          # dataset store and uses DATASET COPY, so this errors on nothing we
+          # currently convert -- it only stops a future file from being wrong.
+          if (!is.na(active)) names_map[[nm]] <- paste0("#copy-of#", active)
+        }
+      }
+    }
+
+    parsed[[i]]$dataset_key <- active
+  }
+  parsed
+}
 #' Remove SPSS comments from syntax
 #' @param syntax Character string of SPSS syntax text
 #' @keywords internal
@@ -428,7 +567,34 @@ split_commands <- function(syntax) {
     # Check if line ends with a period (the SPSS command terminator)
     # But not periods inside quoted strings
     stripped <- trimws(line)
-    if (nchar(stripped) == 0) next
+
+    # A BLANK LINE TERMINATES AN UNTERMINATED COMMAND.
+    #
+    # SPSS's interactive mode (what a syntax window runs) ends a command at the
+    # "." *or* at a blank line. Skipping blank lines instead made an
+    # unterminated command swallow everything up to the next period, which is
+    # not what SPSS does. Measured on round-3-spss/uh3n8 "Syntax 7_building
+    # variable indexes.sps", where the researcher omitted the "." on line 84:
+    #
+    #     des risk_per          <- line 84, no terminator
+    #                           <- line 85, blank
+    #     SAVE OUTFILE='...'    <- line 86
+    #       /COMPRESSED.        <- line 87
+    #
+    # We glued all four into one DESCRIPTIVES and reported a phantom
+    # "variables not present in the dataset: 'SAVE','OUTFILE..DATA','AFTER',
+    # 'SYNTAX',...". The frozen gold shows SPSS ending the command at the blank
+    # line and running it successfully -- "Syntax  des risk_per", then
+    # risk_per 287 .00 .61 .1621 .13799 -- so the SAVE was a separate command
+    # and the divergence was ours.
+    if (nchar(stripped) == 0) {
+      current <- trimws(current)
+      if (nchar(current) > 0) {
+        commands <- c(commands, current)
+        current <- ""
+      }
+      next
+    }
 
     current <- if (nchar(current) == 0) stripped else paste(current, stripped, sep = "\n")
 
@@ -602,7 +768,16 @@ extract_command_type <- function(cmd) {
     # lookahead. `GETX` still won't match `GET` (X is a word char).
     if (grepl(paste0("^", pattern, "(?![A-Za-z0-9_])"), probe,
               ignore.case = TRUE, perl = TRUE)) {
-      return(patterns[i])
+      # unname(): `patterns` is a lookup table keyed by REGEX, so `patterns[i]`
+      # carries that regex along as a names attribute -- e.g. the string
+      # "FREQUENCIES" with names "FRE". Nothing consumes it, and the fallback
+      # path below returns a plain unnamed string, so the same field was named
+      # for some commands and bare for others. The cost is silent: a consumer
+      # writing identical(cmd$command_type, "FREQUENCIES") gets FALSE for every
+      # aliased command and TRUE for the rest, with no error anywhere.
+      # (Measured 2026-09-09: str() showed 'Named chr "FREQUENCIES"' with
+      # attr names "FRE"; `==` was TRUE while identical() was FALSE.)
+      return(unname(patterns[i]))
     }
   }
 
@@ -703,37 +878,50 @@ extract_variables <- function(cmd, command_type) {
     result$analysis <- vars
 
   } else if (command_type == "CORRELATIONS") {
-    vars <- extract_variables_clause(cmd)
-    result$all <- vars
-    result$correlate <- vars
+    # `A B WITH X Y` is a RECTANGULAR request, not the square matrix over the
+    # union -- see split_corr_variables_clause(). Keep both sides distinct so
+    # convert_correlations() can emit only the block SPSS was asked for.
+    clause <- extract_pattern(cmd, "/?VARIABLES\\s*=?\\s*([^/]+)")
+    if (is.null(clause)) {
+      # `/VARIABLES=` is OPTIONAL in CORRELATIONS -- the variable list may follow
+      # the command keyword directly, as in `correlations a b with x y.`
+      # Measured over the corpus: 11 of 322 CORRELATIONS / PARTIAL CORR commands
+      # omit it and 5 of those use WITH, so without this fallback the split
+      # silently degraded to the full square matrix for exactly the commands
+      # this work exists to fix.
+      body <- sub("^\\s*CORRELATIONS?\\s+", "", cmd, ignore.case = TRUE)
+      if (!identical(body, cmd)) clause <- sub("\\s*/.*", "", body)
+    }
+    sides <- split_corr_variables_clause(clause)
+    if (length(sides$x) == 0 && length(sides$y) == 0) {
+      # Malformed or keyword-only clause: fall back to the generic extractor so
+      # a command we cannot split is still converted rather than dropped.
+      vars <- extract_variables_clause(cmd)
+      result$all <- vars
+      result$correlate <- vars
+      result$main_vars <- vars
+      result$with_vars <- character()
+    } else {
+      result$main_vars <- sides$x
+      result$with_vars <- sides$y
+      result$all <- c(sides$x, sides$y)
+      result$correlate <- result$all
+    }
 
   } else if (command_type == "PARTIAL CORR") {
-    # PARTIAL CORR /VARIABLES= y1 y2 BY z1 z2  (BY introduces controls)
+    # PARTIAL CORR /VARIABLES= x1 x2 WITH y1 y2 BY z1 z2
+    #   WITH -> rectangular block {x} x {y};  BY -> control variables.
     vars_clause <- extract_pattern(cmd, "/VARIABLES\\s*=\\s*([^/]+)")
     if (is.null(vars_clause)) {
-      # Fallback: take everything after the command name up to first '/' or newline
+      # Fallback: take everything after the command name up to first '/'
       vars_clause <- sub("^PARTIAL\\s+CORR\\s+", "", cmd, ignore.case = TRUE)
       vars_clause <- sub("\\s*/.*", "", vars_clause)
     }
-    if (!is.null(vars_clause) && nchar(trimws(vars_clause)) > 0) {
-      vars_clause <- trimws(vars_clause)
-      if (grepl("\\bBY\\b", vars_clause, ignore.case = TRUE)) {
-        sides <- strsplit(vars_clause, "(?i)\\bBY\\b", perl = TRUE)[[1]]
-        main <- trimws(strsplit(trimws(sides[1]), "[,[:space:]]+")[[1]])
-        controls <- trimws(strsplit(trimws(sides[2]), "[,[:space:]]+")[[1]])
-        main <- main[nchar(main) > 0]
-        controls <- controls[nchar(controls) > 0]
-        result$main_vars <- main
-        result$controls <- controls
-        result$all <- c(main, controls)
-      } else {
-        toks <- trimws(strsplit(vars_clause, "[,[:space:]]+")[[1]])
-        toks <- toks[nchar(toks) > 0]
-        result$main_vars <- toks
-        result$controls <- character()
-        result$all <- toks
-      }
-    }
+    sides <- split_corr_variables_clause(vars_clause)
+    result$main_vars <- sides$x
+    result$with_vars <- sides$y
+    result$controls  <- sides$controls
+    result$all <- c(sides$x, sides$y, sides$controls)
 
   } else if (command_type == "T-TEST") {
     result$groups <- extract_pattern(cmd, "GROUPS\\s*=\\s*([^(/]+)")
@@ -1150,8 +1338,9 @@ extract_variables <- function(cmd, command_type) {
     # cascade over every downstream chunk that reused `.res`.
     body <- extract_pattern(cmd, "VARIABLES\\s*=?\\s*([^/]+)")
     if (is.null(body)) {
-      first_line <- strsplit(cmd, "\n")[[1]][1]
-      body <- sub("^EXAMINE\\s+", "", first_line, ignore.case = TRUE)
+      # Whole command, not just its first line -- see extract_variables_clause()
+      # for why: a keyword alone on its line otherwise becomes the variable list.
+      body <- sub("^EXAMINE\\s+", "", cmd, ignore.case = TRUE)
       body <- sub("\\s*/.*", "", body)
     }
     body <- sub("\\.\\s*$", "", trimws(body))
@@ -1193,8 +1382,9 @@ extract_variables <- function(cmd, command_type) {
     # "object '.res' not found" cascade as FACTOR/EXAMINE without this branch.
     body <- extract_pattern(cmd, "TABLES\\s*=?\\s*([^/]+)")
     if (is.null(body)) {
-      first_line <- strsplit(cmd, "\n")[[1]][1]
-      body <- sub("^MEANS\\s+", "", first_line, ignore.case = TRUE)
+      # Whole command, not just its first line -- see extract_variables_clause()
+      # for why: a keyword alone on its line otherwise becomes the variable list.
+      body <- sub("^MEANS\\s+", "", cmd, ignore.case = TRUE)
       body <- sub("\\s*/.*", "", body)
     }
     body <- sub("\\.\\s*$", "", trimws(body))
@@ -1224,6 +1414,81 @@ extract_variables <- function(cmd, command_type) {
   result
 }
 
+#' Split a CORRELATIONS / PARTIAL CORR `/VARIABLES=` clause into its sides
+#'
+#' SPSS reads `/VARIABLES = A B C WITH X Y Z BY ctrl` as a request for the
+#' RECTANGULAR block {A,B,C} x {X,Y,Z} -- |x| * |y| coefficients -- optionally
+#' partialling out the BY variables. Without `WITH` it is the usual square
+#' (lower-triangle) matrix over the whole list.
+#'
+#' Before 2026-09-09 neither caller understood `WITH`. The PARTIAL CORR branch
+#' split on `BY` only, so the literal keyword survived, was upper-cased to
+#' "WITH", and the analysis-chunk pre-flight in rmd_generator.R aborted the
+#' whole analysis with "variables not present in the dataset: 'WITH'" --
+#' measured on the corpus file
+#' `round-2-spss/3-converted-local/spss/osf_5a91c46cda91d4000fb0_sample4.sps`,
+#' 14 of its 16 PARTIAL CORR commands produced no output at all. CORRELATIONS
+#' went the other way: [extract_variables_clause()] silently DROPPED the
+#' keyword, so the converter received the union of both sides and emitted a
+#' full square matrix -- 107 of that file's 142 CORRELATIONS commands showed
+#' coefficients SPSS had never been asked for.
+#'
+#' `ALL` is dropped rather than expanded (unchanged from the previous
+#' behaviour); expanding it needs the .sav column list, which is not available
+#' here.
+#'
+#' @param clause Character string: the text of the `/VARIABLES=` clause.
+#' @return List with `x`, `y` and `controls` character vectors. `y` is empty
+#'   when the clause carries no `WITH`.
+#' @keywords internal
+split_corr_variables_clause <- function(clause) {
+  empty <- list(x = character(), y = character(), controls = character())
+  if (is.null(clause) || !nzchar(trimws(clause))) return(empty)
+
+  toks <- function(s) {
+    if (length(s) == 0 || is.na(s)) return(character())
+    s <- sub("\\.\\s*$", "", trimws(s))
+    t <- trimws(strsplit(s, "[,[:space:]]+")[[1]])
+    t <- t[nzchar(t)]
+    # A residual keyword here would become a phantom variable name; ALL is
+    # dropped because expanding it requires the .sav column list.
+    t[!toupper(t) %in% c("BY", "WITH", "ALL")]
+  }
+
+  # Peel a trailing `BY <controls>` off one side. `\b` and `\s` both match
+  # across newlines in PCRE, so a clause wrapped over several physical lines
+  # splits correctly. Word boundaries keep variable names that merely CONTAIN
+  # the keywords intact -- WITHDRAWAL, BYSTANDER, MEAN_WITH_1 and
+  # BYSTANDER_BY_COND all survive (verified 2026-09-09, both directions).
+  take_by <- function(s) {
+    if (!grepl("(?i)\\bBY\\b", s, perl = TRUE)) {
+      return(list(head = s, ctrl = character()))
+    }
+    parts <- strsplit(s, "(?i)\\bBY\\b", perl = TRUE)[[1]]
+    list(head = parts[1], ctrl = toks(paste(parts[-1], collapse = " ")))
+  }
+
+  clause <- trimws(clause)
+
+  # WITH is split FIRST, and BY is then peeled off BOTH sides. Splitting on BY
+  # first (as this did until 2026-09-09) reads a malformed
+  # `A B BY ctrl WITH c d` as controls = {ctrl, c, d} and an empty y-set, so a
+  # PARTIAL CORR silently partials out two variables the researcher asked to
+  # correlate. (Sonnet, /consult 2026-09-09, finding 3 -- reproduced first.)
+  if (grepl("(?i)\\bWITH\\b", clause, perl = TRUE)) {
+    parts <- strsplit(clause, "(?i)\\bWITH\\b", perl = TRUE)[[1]]
+    # SPSS permits a single WITH; if a malformed clause carries more, treat
+    # everything after the first as one y-set rather than dropping it.
+    lhs <- take_by(parts[1])
+    rhs <- take_by(paste(parts[-1], collapse = " "))
+    list(x = toks(lhs$head), y = toks(rhs$head),
+         controls = c(lhs$ctrl, rhs$ctrl))
+  } else {
+    lhs <- take_by(clause)
+    list(x = toks(lhs$head), y = character(), controls = lhs$ctrl)
+  }
+}
+
 #' Extract the VARIABLES= clause
 #' @param cmd Character string of SPSS command text
 #' @keywords internal
@@ -1232,10 +1497,37 @@ extract_variables_clause <- function(cmd) {
   vars_match <- extract_pattern(cmd, "VARIABLES\\s*=?\\s*([^/]+)")
 
   if (is.null(vars_match)) {
-    # Try after command name
-    first_line <- strsplit(cmd, "\n")[[1]][1]
-    vars_match <- sub("^\\w+\\s+", "", first_line)
-    vars_match <- sub("\\s*/.*", "", vars_match)
+    # Everything after the command keyword, up to the first "/" subcommand.
+    #
+    # SPSS terminates a command at the "."; a newline inside it is ordinary
+    # whitespace, so the variable list may continue onto later lines. This
+    # used to slice `cmd` to its FIRST PHYSICAL LINE before stripping the
+    # keyword, which meant that when the keyword stood alone on its line that
+    # line *was* the whole "variable list" and every real variable was lost:
+    #
+    #   Fre                    -> vars: "Fre"   (three variables dropped, and
+    #   TotalnumTV                the report then fired "variables not present
+    #   Totalnuminternet          in the dataset: 'FRE'")
+    #   TotalnumSocial.
+    #
+    # (round-3-spss/rjvq2 "Full Syntax Self-Reporting...", lines 346-349; the
+    # frozen gold records SPSS running it fine, N Valid 1411 on all three.)
+    #
+    # Both substitutions below already work across newlines on R's default
+    # (TRE) engine -- measured 2026-09-09: "\\s" matches "\n", and so does
+    # ".", so a "/" subcommand on a LATER line still terminates the list.
+    # Do NOT add perl = TRUE here: in PCRE "." does not match a newline, and
+    # the truncation would silently swallow every subcommand.
+    body <- sub("^\\w+\\s+", "", cmd)
+    if (identical(body, cmd)) {
+      # No whitespace follows the keyword, so the command carries no argument
+      # list at all (a bare "FREQUENCIES.", or a name the tokenizer could not
+      # split such as "T.TEST"). Returning the keyword itself as a "variable"
+      # is what produced the parser artifacts that later fired as phantom
+      # missing-variable errors.
+      return(character())
+    }
+    vars_match <- sub("\\s*/.*", "", body)
   }
 
   if (is.null(vars_match) || nchar(trimws(vars_match)) == 0) {
@@ -1300,6 +1592,14 @@ extract_options <- function(cmd, command_type) {
 
   if (grepl("/PLOT", cmd, ignore.case = TRUE)) {
     options$plot <- TRUE
+  }
+
+  # PARTIAL CORR states its tail on /SIGNIFICANCE, not /PRINT. Without this the
+  # one-tailed request is invisible to the converter and a two-tailed p is
+  # printed under a one-tailed heading.
+  if (grepl("/SIGNIFICANCE", cmd, ignore.case = TRUE)) {
+    sig <- extract_pattern(cmd, "/SIGNIFICANCE\\s*=?\\s*(\\w+)")
+    if (!is.null(sig)) options$significance <- toupper(sig)
   }
 
   if (grepl("/MISSING", cmd, ignore.case = TRUE)) {
