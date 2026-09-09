@@ -163,7 +163,7 @@ test_that("a variable named HISTOGRAM does not switch the histogram on", {
 #    no spread-vs-level plot, and unlike /PIECHART nothing recorded the omission.
 #    STEMLEAF appears 64 times inside EXAMINE's /PLOT in the corpus, so this is
 #    active, not latent. A requested output that vanishes without a trace is the
-#    'no pretending' defect the portfolio rules name explicitly.
+#    worst kind of defect this package can have: it is invisible.
 
 test_that("a truncated /HIST still draws the histogram", {
   r <- conv("FREQUENCIES VARIABLES=a b /HIST.")
