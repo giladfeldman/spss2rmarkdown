@@ -207,6 +207,25 @@ test_that("a dataset the job never received is a NAMED error, not a fallback", {
   helper <- regmatches(rmd, regexpr("(?s)\\.s2r_ds <- new\\.env.*invisible\\(value\\)\\n\\}",
                                     rmd, perl = TRUE))
   expect_gt(nchar(helper), 0)
+  # Bind the render-time helpers the way the RENDERED report does: by evaluating
+  # the document's OWN s2r-helpers chunk. The hand-written `assign()` stubs above
+  # are NOT sufficient -- they are a reimplementation of .s2r_helpers_chunk() and
+  # drift from it in silence. Measured 2026-09-11: `.s2r_key_looks_like_path` was
+  # added to the report and not to the stub list, so under an INSTALLED package
+  # the emitted .s2r_get() died with `could not find function
+  # ".s2r_key_looks_like_path"` instead of naming the absent dataset. pkgload
+  # masked it -- load_all() puts the package internals on the search path, so
+  # `R CMD check` on the built tarball was the only run that could see it, and it
+  # is the SECOND time this exact drift has happened (the first was
+  # `.s2r_case_hint`, see test-missing-variable-preflight.R).
+  #
+  # The helpers chunk is emitted at position 8 of the document, before anything
+  # that calls it, so this is also the faithful order.
+  .hel <- regmatches(rmd, regexpr("(?s)```[{]r s2r-helpers.*?\n```", rmd, perl = TRUE))
+  stopifnot(length(.hel) == 1L, nchar(.hel) > 0L)
+  .hbody <- sub("(?s)^```[{][^}]*[}]\n", "", .hel, perl = TRUE)
+  .hbody <- sub("(?s)```\\s*$", "", .hbody, perl = TRUE)
+  eval(parse(text = .hbody), envir = env)
   eval(parse(text = helper), envir = env)
   act <- get(".s2r_activate", envir = env)
 

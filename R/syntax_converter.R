@@ -305,8 +305,12 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
     # either -- its own gold for such a command records `Error # 4285 ... Text:
     # <var>` and SPSS carries on with the stale stored column. So we do the same,
     # and say which variable was missing rather than substituting silently. The
-    # test is `all.vars()` on the converted expression, which is R's own parser
-    # answering "what does this need", not a guess. tryCatch stays as a backstop
+    # test is `.s2r_expr_vars()` on the converted expression, which is R's own
+    # parser answering "what does this need", not a guess. (It was a bare
+    # `all.vars()` until 2026-09-10, when C-0007 started emitting
+    # `.data[["T"]]` and `all.vars()` began reporting the name `.data` -- never
+    # a column, so the check was permanently non-empty and the recompute never
+    # ran. See .s2r_expr_vars() in rmd_generator.R.) tryCatch stays as a backstop
     # for the errors variable presence cannot predict (type mismatches, etc.).
     # Suggested during peer review on 2026-09-09; the reviewers'
     # gta94 counter-case did not hold up (FLUENTLY *is* present in that .sav, 69
@@ -341,7 +345,7 @@ convert_spss_to_r <- function(parsed_command, sav_info, all_var_names = NULL) {
           "  # If the expression needs a variable this data does not have, SPSS\n",
           "  # could not recompute either and kept the stored column -- so do that,\n",
           "  # and name the missing variable.\n",
-          "  .s2r_fmiss <- setdiff(all.vars(quote(", r_col, ")), names(data))\n",
+          "  .s2r_fmiss <- setdiff(.s2r_expr_vars(quote(", r_col, ")), names(data))\n",
           "  if (length(.s2r_fmiss) == 0L) {\n",
           "    data <- tryCatch(dplyr::mutate(data, `", fv, "` = ", r_col, "),\n",
           "                     error = function(e) { .s2r_fmiss <<- \"<recompute failed>\"; data })\n",
@@ -1382,6 +1386,36 @@ extract_stepwise_pin_pout <- function(cmd_raw) {
   )
 }
 
+# The confidence LEVEL a `CI(n)` keyword asks for, as a percentage.
+#
+# `.spss_sub_has()` strips parenthesised text before matching keywords -- it has
+# to, or `/SAVE=PRED(COOK)` reads as a request for Cook's distance. That makes
+# `CI(90)` and `CI(99)` indistinguishable from `CI(95)`, so both jmv's `ciWidth`
+# and `ciWidthOR` went unemitted and jmv's 95% default was published as though
+# it were the interval SPSS reported. A wrong interval on a real coefficient,
+# with nothing erroring. Raised independently by consult seats `sol` (openai)
+# and `grok` (xai), 2026-09-10.
+#
+# LATENT IN THIS CORPUS, and said out loud rather than left implied: every one
+# of the 448 `CI(n)` keywords across the 190 .sps asks for 95% -- 242 `CI(95)`,
+# 160 `CI(.95)`, 46 `CI(.9500)`. SPSS accepts the level as either a percentage
+# or a proportion, so all three forms are normalised here; a value at or below 1
+# is read as a proportion. The width is emitted explicitly even when it is 95,
+# so the generated report RECORDS the level instead of inheriting a default.
+.spss_ci_level <- function(txt, sub, default = 95) {
+  m <- regmatches(txt, gregexpr(paste0("/\\s*", .spss_kw_pattern(sub), "[^/]*"),
+                                txt, perl = TRUE))[[1]]
+  if (!length(m)) return(default)
+  hit <- regmatches(m, regexpr("\\bCI\\s*\\(\\s*([0-9.]+)\\s*\\)", m, perl = TRUE))
+  hit <- hit[nzchar(hit)]
+  if (!length(hit)) return(default)
+  v <- suppressWarnings(as.numeric(sub(".*\\(\\s*([0-9.]+)\\s*\\).*", "\\1", hit[[1]])))
+  if (is.na(v) || v <= 0) return(default)
+  if (v <= 1) v <- v * 100
+  if (v >= 100) return(default)
+  round(v, 4)
+}
+
 .spss_regression_options <- function(raw) {
   txt <- .spss_sub_text(raw)
   sub_has <- function(sub, kw) .spss_sub_has(txt, sub, kw)
@@ -1401,7 +1435,60 @@ extract_stepwise_pin_pout <- function(cmd_raw) {
     durbin   = sub_has("RESIDUALS", "DURBIN"),
     norm     = res_all || sub_has("RESIDUALS", "HISTOGRAM") || sub_has("RESIDUALS", "NORMPROB"),
     qqPlot   = res_all || sub_has("RESIDUALS", "NORMPROB"),
-    resPlots = grepl("/SCATTERPLOT", txt, fixed = TRUE)
+    resPlots = grepl("/SCATTERPLOT", txt, fixed = TRUE),
+    # The two REQUESTED-BUT-NOT-EMITTED gates (C-0011). Every gate above this
+    # line answers "did SPSS ask for this?" in the REMOVING direction only;
+    # these two answer it in the other direction, which nothing checked until
+    # now. Corpus incidence, measured over all 190 .sps: CHANGE appears on a
+    # /STATISTICS line in 27 files (324 occurrences), ZPP in 14 files; control
+    # COLLIN, which IS gated above, appears in 15.
+    #
+    # CHANGE -> jmv's Model Comparisons table. There is NO `modelComp` argument
+    # to jmv::linReg (checked against formals(); the 35 names do not include
+    # it) -- jmv emits that table automatically and marks it visible only when
+    # there are two or more blocks. So this flag does not switch the table on;
+    # it decides whether a table jmv produced UNASKED is allowed to reach the
+    # report. Without /STATISTICS CHANGE, SPSS prints one Model Summary row per
+    # model and no change test at all, so an unrequested Model Comparisons
+    # table is the same invention class as the Durbin-Watson one.
+    change   = stat_all || sub_has("STATISTICS", "CHANGE"),
+    # ZPP -> zero-order / partial / part correlations. jmv::linReg has no
+    # equivalent option at all, so this flag only drives a note. Never
+    # approximate it with a different correlation.
+    zpp      = stat_all || sub_has("STATISTICS", "ZPP"),
+    ci_level = .spss_ci_level(txt, "STATISTICS"),
+
+    # The rest of the reverse-direction sweep. Every REGRESSION subcommand
+    # keyword the 190-file corpus actually uses was enumerated (998 REGRESSION
+    # blocks) and each one is either mapped onto a jmv option above or recorded
+    # here as having none. Nothing is approximated by a different statistic.
+    #
+    #   /STATISTICS  ANOVA 670  COEFF 670  OUTS 670  R 670  CHANGE 324  CI 183
+    #                ZPP 85  TOL 53  COLLIN 49  BCOV 48  DEFAULT 3
+    #   /RESIDUALS   HISTOGRAM 56  NORMPROB 56  DURBIN 7      (all mapped)
+    #   /SAVE        COOK 52  LEVER 34  SRESID 15  MAHAL 12  ZRESID 11 ...
+    #   /SCATTERPLOT 57   /DESCRIPTIVES 122   /CASEWISE 6   /PARTIALPLOT 3
+    #   /MISSING     LISTWISE 651  PAIRWISE 24
+    #   /NOORIGIN    669  (jmv's default; /ORIGIN 0 uses)
+    #
+    # OUTS and /DESCRIPTIVES are the two that were assumed harmless and are
+    # not: a frozen SPSS listing for a `/STATISTICS COEFF OUTS ... /DESCRIPTIVES
+    # MEAN STDDEV CORR SIG N` command prints an `Excluded Variables` table and a
+    # `Descriptive Statistics` table, and jmv::linReg produces neither.
+    # `Excluded Variables` appears in 7 of the 131 frozen listings.
+    outs     = stat_all || sub_has("STATISTICS", "OUTS"),
+    bcov     = stat_all || sub_has("STATISTICS", "BCOV"),
+    descrip  = .spss_has_sub(txt, "DESCRIPTIVES"),
+    casewise = .spss_has_sub(txt, "CASEWISE"),
+    partplot = .spss_has_sub(txt, "PARTIALPLOT"),
+    # jmv::linReg deletes listwise and offers no alternative, so a PAIRWISE
+    # request changes the N behind every coefficient. That is a NUMBER
+    # difference, not a missing table, which is why it is called out by name.
+    pairwise = sub_has("MISSING", "PAIRWISE"),
+    # /SAVE writes new columns (COO_1, ZRE_1, ...) into the SPSS dataset.
+    # jmv's cooks/mahal are "output variables" in ITS dataset, never in ours,
+    # so nothing downstream can reference a saved column.
+    saves    = .spss_has_sub(txt, "SAVE")
   )
 }
 
@@ -1488,12 +1575,89 @@ convert_regression <- function(parsed, sav_info) {
              norm = .ropt$norm, qqPlot = .ropt$qqPlot, resPlots = .ropt$resPlots)
   opts_str <- paste0("  ", names(.opts), " = ",
                      ifelse(.opts, "TRUE", "FALSE"), collapse = ",\n")
+  # The LEVEL, not just the switch -- see .spss_ci_level(). Emitted whenever an
+  # interval is emitted, so `/STATISTICS CI(90)` cannot be published as jmv's
+  # 95% default.
+  if (.ropt$ci || .ropt$ciStdEst) {
+    opts_str <- paste0(opts_str, ",\n  ciWidth = ", .ropt$ci_level)
+    if (.ropt$ciStdEst) {
+      opts_str <- paste0(opts_str, ",\n  ciWidthStdEst = ", .ropt$ci_level)
+    }
+  }
 
+  # Notes for what SPSS asked for that jmv cannot give back identically. These
+  # are R comments and the analysis chunks are echoed (echo = TRUE in
+  # generate_rmd), so they reach the READER of the report, not just the file.
+  n_blocks <- if (!is.null(method_blocks)) length(method_blocks) else 1L
+  reg_notes <- character()
+  if (.ropt$durbin) {
+    reg_notes <- c(reg_notes,
+      "  # NOTE [SPSS]: /RESIDUALS DURBIN requested. SPSS prints the Durbin-Watson",
+      "  # STATISTIC alone -- its Model Summary carries no p-value for it. jmv",
+      "  # computes one by SIMULATION and this document sets no seed, so that p",
+      "  # changes on every re-knit. It is suppressed; the statistic is reported.")
+  }
+  if (.ropt$change) {
+    reg_notes <- c(reg_notes,
+      if (n_blocks > 1L) c(
+        "  # NOTE [SPSS]: /STATISTICS CHANGE requested. jmv's Model Comparisons",
+        "  # table tests each block against the PREVIOUS one. SPSS additionally",
+        "  # prints a change row for the FIRST block against the intercept-only",
+        "  # model; jmv produces no such row, so it is absent here.")
+      else c(
+        "  # NOTE [SPSS]: /STATISTICS CHANGE requested, but this REGRESSION has a",
+        "  # single /METHOD block. SPSS would print its change against the",
+        "  # intercept-only model; jmv emits no comparison for a single block, so",
+        "  # the R-square change table has no equivalent and is not reported."))
+  }
+  # One grouped note for everything SPSS was asked to print that jmv::linReg
+  # has no option for (checked against its 35 formals). Recorded, never
+  # approximated by a different statistic, and never dropped in silence.
+  unavailable <- c(
+    if (.ropt$zpp)      "/STATISTICS ZPP (zero-order, partial and part correlations)",
+    # OUTS sits on 670 of the corpus's 679 /STATISTICS lines, and for a single
+    # ENTER block there is nothing to exclude, so SPSS prints no such table
+    # either and a note would be pure noise. It is only a real omission where
+    # SPSS would have had excluded variables to list -- more than one block.
+    # (A STEPWISE/FORWARD/BACKWARD method also excludes variables, but those
+    # return above on the olsrr path and never reach this code.)
+    if (.ropt$outs && n_blocks > 1L)
+                        "/STATISTICS OUTS (the Excluded Variables table)",
+    if (.ropt$bcov)     "/STATISTICS BCOV (the coefficient covariance matrix)",
+    if (.ropt$descrip)  "/DESCRIPTIVES (the Descriptive Statistics and Correlations tables)",
+    if (.ropt$casewise) "/CASEWISE (the Casewise Diagnostics table)",
+    if (.ropt$partplot) "/PARTIALPLOT (partial regression plots)",
+    if (.ropt$saves)    "/SAVE (SPSS writes the saved diagnostics back as new columns; this report does not, so later syntax cannot reference them)"
+  )
+  if (length(unavailable)) {
+    reg_notes <- c(reg_notes,
+      "  # NOTE [SPSS]: the syntax also asked for --",
+      paste0("  #   ", unavailable),
+      "  # jmv::linReg has no option for these, so they are reported as absent",
+      "  # rather than replaced by a different statistic.")
+  }
+  if (.ropt$pairwise) {
+    reg_notes <- c(reg_notes,
+      "  # WARNING [SPSS]: /MISSING PAIRWISE requested. jmv::linReg deletes",
+      "  # cases LISTWISE and offers no alternative, so every coefficient below",
+      "  # is estimated on the listwise N printed above, not on SPSS's pairwise",
+      "  # Ns. The numbers can differ from the SPSS output.")
+  }
+  notes_str <- if (length(reg_notes)) paste0(paste(reg_notes, collapse = "\n"), "\n") else ""
+
+  # s2r_spss_reg_tables() WRAPS the jmv call rather than following it. The
+  # chunk's VALUE is what s2r_render_tables() renders, so a statement placed
+  # after the call would render no tables at all; a wrapper that returns the
+  # same results object leaves that value unchanged.
+  #
+  # Both arguments are always emitted, TRUE or FALSE, so the generated report
+  # RECORDS the decision instead of hiding it.
   r_code <- glue::glue('
 {{
   cat("**N analysed (listwise):**",
       sum(stats::complete.cases(data[, c("{dv}", {ivs_vec}), drop = FALSE])),
       "\\n\\n")
+{notes_str}  s2r_spss_reg_tables(
   jmv::linReg(
   data = data,
   dep = "{dv}",
@@ -1501,6 +1665,9 @@ convert_regression <- function(parsed, sav_info) {
   blocks = {blocks_str},
   refLevels = list(),
 {opts_str}
+),
+  durbin_p = FALSE,
+  model_comp = {ifelse(.ropt$change, "TRUE", "FALSE")}
 )
 }}')
 
@@ -1508,42 +1675,184 @@ convert_regression <- function(parsed, sav_info) {
        analysis_type = "Linear Regression", variables = c(dv, ivs))
 }
 
+# LOGISTIC REGRESSION /PRINT (C-0009). Same fixed-template defect C-0008 fixed
+# for linear regression: fourteen jmv::logRegBin options were hard-coded TRUE
+# regardless of the command, so an ROC curve, an AUC, AIC, BIC and a McFadden
+# R-square were reported for every logistic model whether SPSS produces them or
+# not. It ranked below C-0008 for one measured reason -- none of these is
+# computed by simulation, so unlike the Durbin-Watson p they were WRONG TO
+# INVENT but STABLE.
+#
+# The mapping below is read off SPSS's own output, not off its documentation.
+# Primary sources: the five frozen SPSS listings in the project's test set that
+# contain a LOGISTIC REGRESSION `Variables in the Equation` table.
+#
+# WHAT SPSS PRINTS WITH NO /PRINT AT ALL (measured on a bare `LOGISTIC
+# REGRESSION VARIABLES <dv> /METHOD=ENTER <iv> /CRITERIA=...` whose listing
+# carries no /PRINT subcommand at all): Omnibus Tests of Model Coefficients;
+# Model Summary carrying `-2 Log likelihood`, `Cox & Snell R Square` and
+# `Nagelkerke R Square`; Classification Table; Variables in the Equation with
+# B, S.E., Wald, df, Sig., Exp(B). Those are the always-on options.
+#
+# WHAT NO SPSS LOGISTIC REGRESSION PRINTS, two-sided over all 131 frozen SPSS
+# listings: `AUC` 0 files, `Area Under the Curve` 0, `ROC Curve` 0, `Akaike` 0
+# -- against `Nagelkerke` 5, `Cox & Snell` 5 and `Hosmer` 3 as the presence
+# controls that make those zeros real zeros. The one `McFadden` listing is PLUM
+# (ordinal regression) and the one `BIC` listing is MIXED, neither of them this
+# command. So aic, bic, auc, rocPlot and the r2mf entry of pseudoR2 are off for
+# good.
+#
+# WHAT /PRINT=CI(n) BUYS, and nothing else does -- the gate's two-sided control
+# over those five listings:
+#
+#   /PRINT              Exp(B)   C.I.for EXP(B)
+#   GOODFIT CI(95)          2          1
+#   GOODFIT CI(95)          2          1
+#   CI(95)                 48          8
+#   summary GOODFIT         6          0
+#   (no /PRINT)             2          0
+#
+# The interval SPSS adds is for EXP(B) -- the odds ratio -- never for B, so
+# `ciOR` is gated on CI and `ci` (jmv's interval around the log-odds estimate)
+# is off outright.
+#
+# `omni` is jmv's per-predictor Omnibus LIKELIHOOD-RATIO test. SPSS tests
+# predictors with WALD (in Variables in the Equation) and reserves its own
+# "Omnibus Tests of Model Coefficients" for the Step/Block/Model rows, which is
+# jmv's `modelTest`. A per-predictor LR table is a third test SPSS never
+# printed, so it is off.
+.spss_logistic_options <- function(raw) {
+  txt <- .spss_sub_text(raw)
+  sub_has <- function(kw) .spss_sub_has(txt, "PRINT", kw)
+  print_all <- sub_has("ALL")
+  list(
+    ci_or   = print_all || sub_has("CI"),
+    ci_level = .spss_ci_level(txt, "PRINT"),
+    # Requested-but-unavailable. Recorded, never approximated with a
+    # different statistic -- the reverse-direction check C-0011 exists for.
+    goodfit = print_all || sub_has("GOODFIT"),
+    corr    = print_all || sub_has("CORR"),
+    iter    = print_all || sub_has("ITER"),
+    summary = print_all || sub_has("SUMMARY")
+  )
+}
+
 convert_logistic <- function(parsed, sav_info) {
   dv <- parsed$variables$dependent
+  facs <- setdiff(parsed$variables$factors %||% character(), dv)
   ivs <- parsed$variables$independent %||% parsed$variables$all
-  if (is.null(dv)) {
+  ivs <- setdiff(ivs, c(dv, facs))
+  if (is.null(dv) || !nzchar(dv)) {
     return(list(r_code = "# LOGISTIC REGRESSION: Missing DV",
                 packages = character(), analysis_type = "Logistic Regression"))
   }
+  if (length(ivs) + length(facs) == 0) {
+    return(list(r_code = paste0(
+      "# LOGISTIC REGRESSION: no covariates found for ", dv, ".\n",
+      "# SPSS takes them from a WITH clause or from /METHOD; neither named a\n",
+      "# variable here, so no model is fitted rather than an empty one."),
+      packages = character(), analysis_type = "Logistic Regression"))
+  }
 
   covs_str <- make_vars_str(ivs)
+  .lopt <- .spss_logistic_options(parsed$raw)
+
+  # Emitted explicitly TRUE or FALSE, never omitted, so the generated report
+  # RECORDS each decision rather than hiding it behind a jmv default.
+  .opts <- c(modelTest = TRUE, dev = TRUE,
+             aic = FALSE, bic = FALSE,
+             omni = FALSE,
+             ci = FALSE, OR = TRUE, ciOR = .lopt$ci_or,
+             class = TRUE, acc = TRUE, spec = TRUE, sens = TRUE,
+             auc = FALSE, rocPlot = FALSE)
+  opts_str <- paste0("  ", names(.opts), " = ",
+                     ifelse(.opts, "TRUE", "FALSE"), collapse = ",\n")
+  # SPSS's `/PRINT CI(n)` sets the LEVEL of the Exp(B) interval. Without this
+  # jmv's 95% default was published whatever the syntax asked for. See
+  # .spss_ci_level().
+  if (.lopt$ci_or) {
+    opts_str <- paste0(opts_str, ",\n  ciWidthOR = ", .lopt$ci_level)
+  }
+
+  missing_kw <- c(
+    if (.lopt$goodfit) "GOODFIT (the Hosmer-Lemeshow test and its contingency table)",
+    if (.lopt$corr)    "CORR (the correlation matrix of the parameter estimates)",
+    if (.lopt$iter)    "ITER (the iteration history)",
+    if (.lopt$summary) "SUMMARY (the step summary)"
+  )
+  log_notes <- if (length(missing_kw)) paste0(
+    "# NOTE [SPSS]: /PRINT asked for ", paste(missing_kw, collapse = "; "),
+    ".\n# jmv::logRegBin has no such option -- checked against formals() -- so",
+    "\n# it is omitted rather than replaced by a different statistic.\n") else ""
+
+  # An interaction term reaches `covs` as a name no column can match, so the
+  # parser separates them out. Report them: dropping a term the researcher
+  # asked for without saying so is the silent-omission failure this project
+  # exists to avoid.
+  if (length(parsed$variables$interactions %||% character())) {
+    log_notes <- paste0(log_notes,
+      "# NOTE [SPSS]: /METHOD included the interaction term(s) ",
+      paste(parsed$variables$interactions, collapse = ", "),
+      ".\n# jmv::logRegBin takes variable names only, so the model below is the",
+      "\n# MAIN-EFFECTS model and the interaction is NOT in it.\n")
+  }
+
+  # A contrast type other than Indicator or Simple codes the levels
+  # differently, which changes the coefficients. jmv's `factors` always uses
+  # indicator (dummy) coding against the first level, so say so rather than
+  # let a Deviation or Helmert contrast pass as if it had been honoured.
+  ctypes <- setdiff(toupper(parsed$variables$contrast_types %||% character()),
+                    c("INDICATOR", "SIMPLE", ""))
+  if (length(ctypes)) {
+    log_notes <- paste0(log_notes,
+      "# NOTE [SPSS]: /CONTRAST asked for ", paste(ctypes, collapse = ", "),
+      " coding.\n# jmv::logRegBin codes factors as INDICATOR against the first",
+      " level, so the\n# contrast coefficients below are not the ones SPSS would print.\n")
+  }
+  # SPSS's stepwise methods fit a REDUCED model. jmv::logRegBin has no
+  # equivalent (convert_regression() reaches olsrr for linear stepwise; there
+  # is no logistic counterpart in this stack), so forcing every covariate in
+  # would publish different coefficients under the researcher's method name.
+  # 0 corpus blocks use it, against 114 for /METHOD=ENTER as the control.
+  nonenter <- setdiff(toupper(parsed$variables$methods %||% character()),
+                      c("ENTER", ""))
+  if (length(nonenter)) {
+    log_notes <- paste0(log_notes,
+      "# WARNING [SPSS]: /METHOD=", paste(nonenter, collapse = "/"),
+      " is a STEPWISE method -- SPSS drops\n# predictors that do not meet its",
+      " entry/removal criteria. jmv::logRegBin has no\n# stepwise equivalent, so",
+      " the model below FORCES EVERY PREDICTOR IN and its\n# coefficients are",
+      " not the ones SPSS reported.\n")
+  }
+  # /SELECT restricts SPSS to a subgroup for this command only.
+  if (length(parsed$variables$select_clause %||% character())) {
+    log_notes <- paste0(log_notes,
+      "# WARNING [SPSS]: `", parsed$variables$select_clause,
+      "` restricts this analysis to a\n# subgroup. It is not applied here, so the",
+      " model below is fitted on ALL cases.\n")
+  }
+
+  facs_line <- if (length(facs)) {
+    paste0("\n  factors = ", make_vars_str(facs), ",")
+  } else ""
+  covs_line <- if (length(ivs)) {
+    paste0("\n  covs = ", covs_str, ",")
+  } else ""
+  block_vars <- c(ivs, facs)
 
   r_code <- glue::glue('
-jmv::logRegBin(
+{log_notes}jmv::logRegBin(
   data = data,
-  dep = "{dv}",
-  covs = {covs_str},
-  blocks = list(list({paste0(\'"\', ivs, \'"\', collapse = ", ")})),
+  dep = "{dv}",{covs_line}{facs_line}
+  blocks = list(list({paste0(\'"\', block_vars, \'"\', collapse = ", ")})),
   refLevels = list(),
-  modelTest = TRUE,
-  dev = TRUE,
-  aic = TRUE,
-  bic = TRUE,
-  pseudoR2 = c("r2mf", "r2cs", "r2n"),
-  omni = TRUE,
-  ci = TRUE,
-  OR = TRUE,
-  ciOR = TRUE,
-  class = TRUE,
-  acc = TRUE,
-  spec = TRUE,
-  sens = TRUE,
-  auc = TRUE,
-  rocPlot = TRUE
+  pseudoR2 = c("r2cs", "r2n"),
+{opts_str}
 )')
 
   list(r_code = r_code, packages = "jmv",
-       analysis_type = "Logistic Regression", variables = c(dv, ivs))
+       analysis_type = "Logistic Regression",
+       variables = c(dv, ivs, facs))
 }
 
 convert_reliability <- function(parsed, sav_info) {
@@ -2489,10 +2798,20 @@ convert_if <- function(parsed, sav_info) {
     # if_else() writes NA wherever the condition is NA (e.g. user-missing codes
     # nulled by read_sav), destroying values shipped in the .sav ("Math is
     # cool" MissingData t-test, 2026-08-04).
+    # The PRESERVED-VALUE argument is a READ of the target column, so it carries
+    # the same hazard C-0007 fixed inside convert_spss_expression(): a target
+    # called T or F is base R's TRUE/FALSE, and a bare `T` there would read as
+    # the logical whenever the column is absent instead of erroring. The line
+    # above pre-creates the column, so the mask normally shadows it -- but
+    # "normally" is exactly the assumption that made the original defect
+    # silent. `.data[[...]]` removes the assumption. The mutate TARGET stays a
+    # bare name because that is an assignment, not a read. Raised by consult
+    # seat `grok` (xai), 2026-09-10.
+    keep <- if (target %in% c("T", "F")) paste0('.data[["', target, '"]]') else target
     r_code <- paste0(casenum_note, glue::glue("
 if (!'{target}' %in% names(data)) data[['{target}']] <- NA
 data <- data |>
-  dplyr::mutate({target} = dplyr::if_else({r_condition}, {r_expr}, {target}, missing = {target}))"))
+  dplyr::mutate({target} = dplyr::if_else({r_condition}, {r_expr}, {keep}, missing = {keep}))"))
   } else {
     r_code <- glue::glue("
 # IF command could not be fully parsed:
@@ -2989,8 +3308,48 @@ convert_spss_expression <- function(expr) {
 
   # Normalize variable names to UPPERCASE (but protect R functions and literals)
   r_expr <- gsub("\\b([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])\\b", "\\U\\1", r_expr, perl = TRUE)
-  # Also handle single-char variable names
-  # (the above pattern requires 2+ chars due to the character class at end)
+
+  # C-0007: single-character variable names. The pattern above needs TWO OR
+  # MORE characters -- `[A-Za-z_]` then any run then `[A-Za-z0-9_]` -- so `a`
+  # stayed lower-case while `aa` became `AA`. The loader upper-cases every
+  # column, so `a` matched nothing and the transformation errored.
+  #
+  #   convert_spss_expression("(a = 1 AND b = 2)")   -> "(a == 1 & b == 2)"
+  #   convert_spss_expression("(aa = 1 AND bb = 2)") -> "(AA == 1 & BB == 2)"
+  #
+  # A real corpus file does exactly this: `if (x = -6 and sweep = 1) x =
+  # INTCMC04.` six times over. The assignment TARGET is normalised by
+  # convert_if(), so the emitted line reads `mutate(X = if_else(x == -6 & SWEEP
+  # == 1, INTCMC04, X))` -- upper-case on one side of the same variable and
+  # lower-case on the other. It fails LOUD, which is why this ranked P2.
+  #
+  # This pass runs where it does -- AFTER every R-emitting rule -- so it can see
+  # tokens this function itself produced, and the guard is the lookahead for an
+  # opening parenthesis: a single letter followed by `(` is a CALL, which is how
+  # the `c` of the `c(...)` that ANY() emits survives. The `%in%` operator needs
+  # no guard (both its letters are adjacent to another letter, so neither
+  # matches) and neither does an exponent like `1e-5` (the `e` is preceded by a
+  # digit). Two-sided controls for all four are in
+  # test-expression-single-char-names.R.
+  r_expr <- gsub("(?<![A-Za-z0-9_.$])([a-z])(?![A-Za-z0-9_.]|\\s*\\()",
+                 "\\U\\1", r_expr, perl = TRUE)
+
+  # ...except that TWO of the twenty-six upper-case names R already means
+  # something by: `T` and `F` are base R's aliases for TRUE and FALSE. Every
+  # expression this function produces is placed inside dplyr::mutate(),
+  # dplyr::filter() or dplyr::if_else(), where a COLUMN called T shadows the
+  # base value -- so `T` is right while the column exists and silently becomes
+  # TRUE the moment it does not. That would convert a loud missing-variable
+  # error into a condition that is true for every row, which is the one
+  # direction this project must never trade toward. `.data[["T"]]` keeps the
+  # column reference and restores the loud error ("Column `T` not found").
+  #
+  # This also repairs the case that predates the line above: a researcher whose
+  # SPSS variable was already written `T` in upper case has always been emitted
+  # as a bare `T`. `\bT\b` cannot fire inside TRUE or FALSE (the boundary
+  # fails), and nothing else in this function emits a bare T or F.
+  r_expr <- gsub("\\bT\\b", '.data[["T"]]', r_expr, perl = TRUE)
+  r_expr <- gsub("\\bF\\b", '.data[["F"]]', r_expr, perl = TRUE)
 
   # Restore R function names to proper case
   # DATEDIFF -> lubridate fixups (function names + unit strings) must lowercase

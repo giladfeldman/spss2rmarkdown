@@ -102,6 +102,147 @@ s2r_render_model <- function(model) {
   print(summary(model)); invisible()
 }
 
+# Bring a jmv::linReg results object into line with what SPSS actually prints,
+# for the two tables jmv decides for itself. Called by the emitted regression
+# chunk, which WRAPS the jmv call in it -- see convert_regression() for why a
+# wrapper and not a following statement. Returns the same object, so the
+# chunk's value (which is what s2r_render_tables() renders) is unchanged.
+#
+# DURBIN-WATSON. SPSS reports it as a STATISTIC and prints no p-value for it.
+# Primary source, read directly rather than inferred: a frozen SPSS listing
+# from the project's regression test set (SPSS output created 04-SEP-2026) for
+# a two-block REGRESSION carrying `/RESIDUALS DURBIN`. Its Model Summary has a
+# `Durbin-Watson` column holding one number and nothing else --
+#
+#   Model R       R      Adjusted Std. Error   Change Statistics          Durbin-Watson
+#                 Square R Square the Estimate R Sq Ch  F Ch   df1 df2 Sig
+#   1     .607(b) .369   .366     5.023        .369     128.897 2  441 .000
+#   2     .609(c) .370   .366     5.023        .001       1.035 1  440 .310  1.856
+#
+# -- the only "Sig." on that row belongs to the F Change column, not to the
+# Durbin-Watson one. jmv's Durbin-Watson table adds a p that it computes by
+# SIMULATION, and the generated document sets no seed, so the SAME document
+# re-knitted on the SAME data gives a DIFFERENT p: four sessions have now
+# reproduced that with four disjoint value sets (.042-.062, .054-.082,
+# .898-.966, .864-.972), several of them straddling .05.
+#
+# Seeding it was the other candidate fix and is the WRONG one: SPSS prints no
+# such p, so a seed would leave an invented number in the report and merely
+# stop it moving -- worse than unstable, because a number that stops moving
+# stops looking suspicious. The p is dropped and the statistic SPSS does print
+# is kept. `durbin_p` exists so the emitted call states that decision out loud.
+#
+# MODEL COMPARISONS. jmv::linReg has no `modelComp` argument (checked against
+# formals()); it emits that table by itself whenever there are two or more
+# blocks. SPSS prints an R-square-change test only for /STATISTICS CHANGE, so
+# without that keyword the table is a request nobody made.
+#
+# Dependency-free: this is deparsed verbatim into every generated .Rmd by
+# .s2r_helpers_chunk(). Every jmv access is guarded, so an older or newer jmv
+# whose results object is shaped differently degrades to "changed nothing"
+# rather than killing the chunk.
+s2r_spss_reg_tables <- function(res, durbin_p = FALSE, model_comp = TRUE) {
+  # FAIL LOUD, NOT OPEN. Every one of these calls reaches into a jmv results
+  # object whose internal shape this package does not control, and DESCRIPTION
+  # puts no upper bound on the jmv version. A bare tryCatch(..., NULL) would
+  # therefore publish the invented number under any jmv whose layout has moved,
+  # with nothing red anywhere -- the exact silent-wrong-value failure the
+  # suppression exists to prevent. So each hide is VERIFIED by reading
+  # `$visible` back, and a hide that did not take prints a warning into the
+  # report itself. All three consult seats (sonnet/anthropic, sol/openai,
+  # grok/xai) raised this independently on 2026-09-10.
+  .hidden <- function(el) {
+    if (is.null(el)) return(NA)
+    ok <- tryCatch({ el$setVisible(FALSE); TRUE }, error = function(e) FALSE)
+    if (!isTRUE(ok)) return(FALSE)
+    v <- tryCatch(el$visible, error = function(e) NULL)
+    # A jmv that has no readable `$visible` cannot confirm the hide either way;
+    # NA is "unknown", which is reported differently from "failed".
+    if (is.null(v) || !is.logical(v) || length(v) != 1L) return(NA)
+    !isTRUE(v)
+  }
+  .say <- function(what) {
+    cat("\n\n> **Conversion note:** could not suppress ", what,
+        " in the jmv output. The value shown is jmv's, not SPSS's -- ",
+        "treat it as unverified.\n\n", sep = "")
+  }
+
+  models <- tryCatch(res$models, error = function(e) NULL)
+  n <- tryCatch(length(models), error = function(e) 0L)
+  if (!(length(n) == 1L && is.finite(n))) n <- 0L
+  for (i in seq_len(n)) {
+    dw <- tryCatch(models[[i]]$assump$durbin, error = function(e) NULL)
+    if (is.null(dw)) next
+    # SPSS prints the Durbin-Watson statistic ONCE, on the row of the FINAL
+    # model -- in the frozen listing above, model 1's Durbin-Watson cell is
+    # blank and only model 2 carries 1.856. jmv builds the table per block, so
+    # every intermediate block publishes a statistic SPSS left empty. Raised by
+    # seat `grok` (xai) and checked against that listing before acting.
+    if (i < n) {
+      if (isFALSE(.hidden(dw))) .say("the Durbin-Watson table for an intermediate block")
+      next
+    }
+    if (!isTRUE(durbin_p)) {
+      if (isFALSE(.hidden(tryCatch(dw$getColumn("p"), error = function(e) NULL)))) {
+        .say("jmv's simulated Durbin-Watson p-value")
+      }
+    }
+    # SPSS's Model Summary has a `Durbin-Watson` column and no autocorrelation
+    # column anywhere, so jmv's `Autocorrelation` is a second number the source
+    # software did not report. Deterministic, unlike the p, but still not
+    # SPSS's output. Raised by seats `sol` (openai) and `grok` (xai).
+    if (isFALSE(.hidden(tryCatch(dw$getColumn("autoCor"), error = function(e) NULL)))) {
+      .say("jmv's Durbin-Watson autocorrelation column")
+    }
+  }
+
+  if (!isTRUE(model_comp)) {
+    mc <- tryCatch(res$modelComp, error = function(e) NULL)
+    if (isFALSE(.hidden(mc))) .say("jmv's unrequested Model Comparisons table")
+  }
+  res
+}
+
+# The variable names an emitted expression actually READS.
+#
+# `all.vars()` alone stopped being the right answer on 2026-09-10. C-0007 makes
+# convert_spss_expression() emit `.data[["T"]]` for a variable named T, because
+# base R's `T` is an alias for TRUE and a bare `T` silently evaluates to TRUE
+# whenever the column is absent. `all.vars()` reports that as the name `.data`:
+#
+#   all.vars(quote(.data[["T"]] == 1 & AGE > 2))   ->   ".data"  "AGE"
+#
+# `.data` is never a column, so a missing-variable check built on `all.vars()`
+# is PERMANENTLY non-empty for any expression touching such a variable. The
+# FILTER recompute is gated on exactly that check, so it would have been skipped
+# every time and the stale stored column used instead -- silently, and with a
+# conversion note blaming a variable called `.data`. That is the ADIFILT class
+# of defect test-filter-recompute-wins.R exists to prevent, re-entering through
+# the fix for a different one.
+#
+# Found by consult seat `sonnet` (anthropic), 2026-09-10, reviewing 2e80403;
+# reproduced here before this helper was written.
+#
+# Dependency-free: deparsed into every generated .Rmd by .s2r_helpers_chunk().
+.s2r_expr_vars <- function(e) {
+  lit <- character()
+  walk <- function(x) {
+    if (is.call(x)) {
+      if (length(x) == 3L && identical(x[[1]], as.name("[[")) &&
+          identical(x[[2]], as.name(".data")) && is.character(x[[3]])) {
+        lit <<- c(lit, as.character(x[[3]]))
+      }
+      for (i in seq_along(x)) {
+        el <- tryCatch(x[[i]], error = function(e) NULL)
+        if (!is.null(el)) walk(el)
+      }
+    }
+    invisible()
+  }
+  walk(e)
+  unique(c(setdiff(all.vars(e), ".data"), lit))
+}
+
 # Make a converter's r_code safe to substitute as the RHS of `.res <- <r_code>`.
 #
 # Several converters degrade to a comment-only stub when they cannot resolve
@@ -199,6 +340,31 @@ s2r_render_model <- function(model) {
          paste(missing[keep], collapse = ", "), ")")
 }
 
+# Was this dataset key ever a FILE, or only a name inside the SPSS session?
+#
+# It decides what we tell a researcher whose dataset we do not have. "Upload it
+# alongside the syntax" is right for a path they can go and find. It is wrong,
+# and sends them looking for something that never existed, when the key was an
+# in-session SPSS dataset name produced by a DATASET or merge command we could
+# not perform.
+#
+# Measured under C-0001 across all 190 corpus .sps: of the 33 non-active `/FILE=`
+# operands, ZERO exist on disk -- 9 are in-session dataset names (`DataSet2`,
+# `Demos`, `Temp1`, `PreRegAnalyses2`, `ExclusionCriteria`) and 24 are absolute
+# paths on the researcher's own machine. Both groups reached the same message.
+#
+# Keyed off the SHAPE of the reference -- a path separator, or a data-file
+# extension -- never off a filename or a corpus item. A bare `data.sav` counts as
+# a path because it names a file the researcher plausibly has.
+#
+# RENDER-time helper: deparsed into the generated .Rmd, so it must stay
+# dependency-free.
+.s2r_key_looks_like_path <- function(key) {
+  k <- as.character(key %||% "")
+  if (!nzchar(k)) return(FALSE)
+  grepl("[/\\\\]", k) || grepl("\\.(sav|zsav|por|dta|csv|txt)$", k, ignore.case = TRUE)
+}
+
 # Narrow a converter's declared `variables` to the ones its emitted code
 # actually references.
 #
@@ -267,7 +433,10 @@ s2r_render_model <- function(model) {
 .s2r_helpers_chunk <- function() {
   defs <- vapply(
     c(".s2r_table_to_html", "s2r_render_tables", "s2r_render_model",
-      ".s2r_format_error", ".s2r_missing_vars", ".s2r_case_hint"),
+      "s2r_spss_reg_tables",
+      ".s2r_format_error", ".s2r_missing_vars", ".s2r_case_hint",
+      ".s2r_key_looks_like_path",
+      ".s2r_expr_vars"),
     function(nm) paste0(nm, " <- ", paste(deparse(get(nm)), collapse = "\n")),
     character(1)
   )
@@ -585,9 +754,17 @@ for (.sec in {vec_lit}) {{
       r"(  # suffix to find the file; the instances then keep separate state.)",
       r"(  key <- sub("#[0-9]+$", "", key))",
       r"(  if (!file.exists(key)) {{)",
-      r"(    stop("the syntax switches to dataset '", key, "', which was not provided ",)",
-      r"(         "with this conversion; upload it alongside the syntax to reproduce ",)",
-      r"(         "these analyses", call. = FALSE))",
+      r"(    if (.s2r_key_looks_like_path(key)) {{)",
+      r"(      stop("the syntax switches to dataset '", key, "', which was not provided ",)",
+      r"(           "with this conversion; upload it alongside the syntax to reproduce ",)",
+      r"(           "these analyses", call. = FALSE))",
+      r"(    }} else {{)",
+      r"(      stop("the syntax switches to dataset '", key, "', which was never a file ",)",
+      r"(           "you can supply: it was created during the SPSS session by a command ",)",
+      r"(           "this conversion could not perform, so there is nothing to upload. ",)",
+      r"(           "See the Conversion Notes for the command that would have produced ",)",
+      r"(           "it", call. = FALSE))",
+      r"(    }})",
       r"(  }})",
       r"(  d <- haven::read_sav(key))",
       r"(  names(d) <- normalize_spss_names(names(d)))",

@@ -1078,6 +1078,135 @@ extract_variables <- function(cmd, command_type) {
     result$method_blocks <- method_blocks
     result$all <- c(result$dependent, result$independent)
 
+  } else if (command_type == "LOGISTIC REGRESSION") {
+    # There was NO branch here until 2026-09-10, so extract_variables() fell
+    # through and returned `all = character(0)` for every LOGISTIC REGRESSION in
+    # the corpus. convert_logistic() then hit its `is.null(dv)` guard and
+    # emitted `# LOGISTIC REGRESSION: Missing DV` instead of an analysis --
+    # measured at the real call site: 36 such stubs across 3 of the 47 rendered
+    # documents, and 0 occurrences of `logRegBin` in any of them. Two-sided
+    # control on the same 47: REGRESSION appears in 20 of them and emits real
+    # jmv::linReg calls, so the zero was a real zero and not a broken probe.
+    # A researcher's entire logistic regression was silently absent from the
+    # report -- the same class as a dropped MATCH FILES.
+    #
+    # SPSS: LOGISTIC REGRESSION [VARIABLES=] dv [WITH iv ...]
+    #         [/METHOD = {ENTER|FSTEP|BSTEP} [iv ...]] ...
+    # The dependent is the first token; the covariates may arrive either on the
+    # WITH clause or on one or more /METHOD subcommands, and real corpus files
+    # use both.
+    head <- sub("/.*$", "", cmd)
+    head <- sub("^\\s*LOGISTIC\\s+REGRESSION\\s*", "", head, ignore.case = TRUE)
+    head <- sub("^VARIABLES\\s*=?\\s*", "", head, ignore.case = TRUE)
+    .lr_tokens <- function(x) {
+      # SPSS allows a parenthesised qualifier on a method -- `/METHOD=BSTEP(LR)`
+      # picks the likelihood-ratio removal test. Without dropping it, `LR`
+      # became a predictor name no column can match. Raised by consult seats
+      # `sol` (openai) and `grok` (xai), 2026-09-10; 0 corpus blocks use it,
+      # against 114 for /METHOD=ENTER as the control, so it is latent.
+      x <- gsub("\\([^)]*\\)", " ", x, perl = TRUE)
+      t <- trimws(strsplit(x, "[,[:space:]]+")[[1]])
+      t <- sub("\\.\\s*$", "", t)
+      t[nchar(t) > 0]
+    }
+    toks <- .lr_tokens(head)
+    with_vars <- character()
+    if (length(toks) > 0) {
+      result$dependent <- toks[1]
+      w <- which(toupper(toks) == "WITH")
+      if (length(w) > 0 && w[1] < length(toks)) {
+        with_vars <- toks[(w[1] + 1):length(toks)]
+      }
+    }
+
+    # `=` is OPTIONAL after /METHOD in SPSS -- `/METHOD BSTEP a b` is legal and
+    # the `=`-only form dropped every one of its variables. Same for the method
+    # keyword itself, read just below. Raised by seats `sol` and `grok`.
+    m_all <- regmatches(cmd, gregexpr("/METHOD\\s*=?\\s*\\w+[^/]*", cmd,
+                                      ignore.case = TRUE))[[1]]
+    method_vars <- character()
+    by_terms <- character()
+    for (m in m_all) {
+      body <- sub("/METHOD\\s*=?\\s*\\w+(\\s*\\([^)]*\\))?", "", m, ignore.case = TRUE)
+      # `a BY b` INSIDE a /METHOD subcommand -- read from the subcommand text
+      # rather than from the token list, because the list is de-duplicated and
+      # a trailing `a BY b` after `a b` collapses to a lone `BY`. Restricted to
+      # the slice so the English "by" in a researcher's comment cannot match:
+      # all 3 `BY` occurrences in this corpus's LOGISTIC blocks are prose.
+      by_terms <- c(by_terms, gsub("\\s+BY\\s+", "*",
+        regmatches(body, gregexpr(
+          "[A-Za-z_][A-Za-z0-9_.$#@]*\\s+BY\\s+[A-Za-z_][A-Za-z0-9_.$#@]*",
+          body, ignore.case = TRUE, perl = TRUE))[[1]],
+        ignore.case = TRUE, perl = TRUE))
+      method_vars <- c(method_vars, .lr_tokens(body))
+    }
+
+    ivs <- unique(c(with_vars, method_vars))
+    # SPSS accepts `a*b` interaction terms on /METHOD. jmv's `covs` takes
+    # variable NAMES only, so passing one through would emit a name no column
+    # can match. Recorded here and reported by the converter rather than
+    # silently dropped or silently forwarded.
+    # SPSS writes an interaction as `a*b` OR as `a BY b`. The BY form left a
+    # bare `BY` in the covariate list -- a name no column can match -- and the
+    # interaction itself went unrecorded, so nothing told the reader the
+    # emitted model was missing a term the researcher asked for. Raised by seat
+    # `sol` (openai); 0 corpus blocks use it inside /METHOD, so it is latent.
+    ivs <- ivs[toupper(ivs) != "BY"]
+    result$interactions <- unique(c(by_terms,
+                                    ivs[grepl("*", ivs, fixed = TRUE)]))
+    # The flanking variables STAY as main effects. `/METHOD=ENTER a BY b` asks
+    # SPSS for the interaction alone, so keeping them over-includes -- but the
+    # interaction note below already tells the reader the emitted model is the
+    # main-effects one, and dropping a variable the researcher named is the
+    # worse error of the two.
+    ivs <- setdiff(ivs, c(result$interactions, result$dependent))
+
+    # /CONTRAST (var)=Indicator(1) declares var CATEGORICAL. Without this, the
+    # variable goes into jmv's `covs` and is fitted as a CONTINUOUS predictor --
+    # one coefficient for a linear trend across arbitrary category codes, where
+    # SPSS fits one contrast per level. Measured on a 3-category predictor:
+    # continuous gives a single Estimate -0.228; `factors` gives `2 - 1` and
+    # `3 - 1`, which is what SPSS's Indicator(1) produces. A silently different
+    # number, and this corpus uses it -- 38 LOGISTIC REGRESSION blocks across 4
+    # files, against 0 for /CATEGORICAL, 0 for /METHOD=BSTEP and 0 for /SELECT.
+    # (/CATEGORICAL is SPSS's other way of declaring the same thing; it is read
+    # here too so a file that uses it is not a silent hole.)
+    ct <- regmatches(cmd, gregexpr("/\\s*CONTRAST\\s*\\(([^)]*)\\)\\s*=?\\s*(\\w+)?",
+                                   cmd, ignore.case = TRUE, perl = TRUE))[[1]]
+    fac <- character(); ctypes <- character()
+    for (m in ct) {
+      v <- sub("^.*\\(([^)]*)\\).*$", "\\1", m)
+      fac <- c(fac, .lr_tokens(v))
+      ty <- sub("^.*\\)\\s*=?\\s*", "", m)
+      if (nzchar(trimws(ty))) ctypes <- c(ctypes, toupper(trimws(ty)))
+    }
+    cat_sub <- regmatches(cmd, gregexpr("/\\s*CATEGORICAL[^/]*", cmd,
+                                        ignore.case = TRUE, perl = TRUE))[[1]]
+    for (m in cat_sub) {
+      fac <- c(fac, .lr_tokens(sub("^/\\s*CATEGORICAL\\s*=?\\s*", "", m,
+                                   ignore.case = TRUE)))
+    }
+    fac <- setdiff(unique(fac), c(result$dependent, ""))
+    result$factors <- fac
+    result$contrast_types <- unique(ctypes)
+    result$independent <- setdiff(ivs, fac)
+    result$all <- unique(c(result$dependent, ivs, fac))
+
+    # SPSS's own case-selection subcommand and its stepwise methods. Neither
+    # occurs in this corpus (0 blocks each, against 114 for /METHOD=ENTER as
+    # the control) but both would change the model SILENTLY if they did, so
+    # they are recorded for the converter to report. Raised by consult seat
+    # `sonnet` (anthropic), 2026-09-10.
+    result$select_clause <- {
+      m <- regmatches(cmd, regexpr("/\\s*SELECT[^/.]*", cmd,
+                                   ignore.case = TRUE, perl = TRUE))
+      if (length(m)) trimws(m) else character()
+    }
+    result$methods <- toupper(unlist(regmatches(cmd,
+      gregexpr("/\\s*METHOD\\s*=?\\s*(\\w+)", cmd, ignore.case = TRUE,
+               perl = TRUE))))
+    result$methods <- unique(sub("^.*[= ]", "", result$methods))
+
   } else if (command_type == "CROSSTABS") {
     by_match <- regmatches(cmd, regexec("(\\w+)\\s+BY\\s+(\\w+)", cmd, ignore.case = TRUE))[[1]]
     if (length(by_match) >= 3) {

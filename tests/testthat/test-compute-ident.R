@@ -55,8 +55,13 @@ test_that("convert_spss_expression translates $SYSMIS to NA (constant, not funct
   expect_equal(trimws(convert_spss_expression("$SYSMIS")), "NA")
   expect_equal(trimws(convert_spss_expression("$sysmis")), "NA")   # case-insensitive
   # The SYSMIS(x)/MISSING(x) FUNCTION forms are unaffected by the constant rule.
-  expect_match(convert_spss_expression("SYSMIS(y)"), "is.na(y)", fixed = TRUE)
-  expect_match(convert_spss_expression("MISSING(x)"), "is.na(x)", fixed = TRUE)
+  # The ARGUMENT is upper-cased since C-0007 (2026-09-10): these two expectations
+  # used to read `is.na(y)` / `is.na(x)`, which was the single-character defect
+  # written down as an expectation -- the loader upper-cases every column, so a
+  # lower-case `y` matched nothing. Two-char names were always upper-cased here.
+  expect_match(convert_spss_expression("SYSMIS(y)"), "is.na(Y)", fixed = TRUE)
+  expect_match(convert_spss_expression("MISSING(x)"), "is.na(X)", fixed = TRUE)
+  expect_match(convert_spss_expression("MISSING(xx)"), "is.na(XX)", fixed = TRUE)
 })
 
 # R-0096: $SYSMIS was the only bare-$ SPSS system variable handled, so any

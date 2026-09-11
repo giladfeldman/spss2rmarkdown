@@ -97,11 +97,127 @@ test_that("/STATISTICS ALL turns on the ones ALL covers", {
   expect_match(r$r_code, "durbin = FALSE", fixed = TRUE)
 })
 
-test_that("the jmv call is still the LAST expression, so the tables render", {
-  # s2r_render_tables() renders the value of the chunk; if anything follows the
-  # jmv call the whole analysis silently produces no tables.
+test_that("the emitted call is still the LAST expression, so the tables render", {
+  # s2r_render_tables() renders the VALUE of the chunk; if anything follows the
+  # analysis call the whole analysis silently produces no tables. Since C-0008
+  # the jmv call is WRAPPED in s2r_spss_reg_tables(), which returns the same
+  # results object -- so the value is unchanged and the wrapper is what has to
+  # come last.
   r <- conv("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1 X2.")
-  expect_match(r$r_code, "resPlots = (TRUE|FALSE)\\s*\\)\\s*\\}\\s*$")
+  expect_match(r$r_code, "model_comp = (TRUE|FALSE)\\s*\\)\\s*\\}\\s*$")
+  expect_match(r$r_code, "s2r_spss_reg_tables(\n  jmv::linReg(", fixed = TRUE)
+})
+
+# ---------------------------------------------------------------------------
+# C-0011 -- THE OTHER DIRECTION. Every gate above answers "did SPSS ask for
+# this?" only in the REMOVING sense. Nothing checked for output SPSS DID ask
+# for, or for a table jmv volunteers that SPSS never printed. Measured over all
+# 190 corpus .sps: `CHANGE` on a /STATISTICS line in 27 files (324
+# occurrences), `ZPP` in 14 files; `COLLIN`, which the gates above already
+# cover, in 15 -- so these are as common as the ones already handled.
+# ---------------------------------------------------------------------------
+
+test_that("Model Comparisons is suppressed unless /STATISTICS CHANGE asked for it", {
+  # jmv::linReg has NO `modelComp` argument (35 formals, none of them that
+  # name): jmv emits the table itself whenever there are two or more blocks.
+  # Without /STATISTICS CHANGE, SPSS prints one Model Summary row per model and
+  # no change test at all, so an unrequested Model Comparisons table is the
+  # same invention class as the Durbin-Watson one.
+  r <- conv("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1 /METHOD=ENTER X2.")
+  expect_match(r$r_code, "model_comp = FALSE", fixed = TRUE)
+})
+
+test_that("TWO-SIDED: /STATISTICS CHANGE lets Model Comparisons through", {
+  r <- conv(paste("REGRESSION /STATISTICS COEFF OUTS R ANOVA CHANGE",
+                  "/DEPENDENT=Y /METHOD=ENTER X1 /METHOD=ENTER X2."))
+  expect_match(r$r_code, "model_comp = TRUE", fixed = TRUE)
+  # ...and says out loud which part of SPSS's table jmv cannot reproduce.
+  expect_match(r$r_code, "/STATISTICS CHANGE requested", fixed = TRUE)
+  expect_match(r$r_code, "intercept-only", fixed = TRUE)
+})
+
+test_that("a single-block CHANGE request is REPORTED, not silently dropped", {
+  # jmv emits no comparison at all for one block, so SPSS's change-from-null
+  # row has no equivalent. Saying nothing would be the silent-omission half of
+  # the same defect.
+  r <- conv("REGRESSION /STATISTICS CHANGE /DEPENDENT=Y /METHOD=ENTER X1.")
+  expect_match(r$r_code, "single /METHOD block", fixed = TRUE)
+  expect_match(r$r_code, "has no equivalent and is not reported", fixed = TRUE)
+})
+
+test_that("ZPP is recorded as unavailable, never approximated", {
+  # jmv::linReg has no zero-order / partial / part correlation option at all.
+  r <- conv(paste("REGRESSION /STATISTICS COEFF OUTS R ANOVA COLLIN TOL ZPP",
+                  "/DEPENDENT=Y /METHOD=ENTER X1 X2."))
+  expect_match(r$r_code, "/STATISTICS ZPP (zero-order, partial and part correlations)",
+               fixed = TRUE)
+  expect_match(r$r_code, "reported as absent", fixed = TRUE)
+  # The COLLIN/TOL half of the same command still works -- so the note is an
+  # addition, not a replacement for the gating.
+  expect_match(r$r_code, "collin = TRUE", fixed = TRUE)
+})
+
+test_that("TWO-SIDED: a command asking for neither gets neither note", {
+  r <- conv("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1 X2.")
+  expect_false(grepl("NOTE [SPSS]", r$r_code, fixed = TRUE))
+})
+
+# --- the rest of the reverse-direction sweep -------------------------------
+# Every REGRESSION subcommand keyword the corpus uses was enumerated over 998
+# REGRESSION blocks; the ones jmv::linReg has no option for are named in the
+# report instead of vanishing. Counts are in .spss_regression_options().
+
+test_that("output SPSS was asked for and jmv cannot give is NAMED", {
+  r <- conv(paste("REGRESSION /DESCRIPTIVES MEAN STDDEV CORR SIG N",
+                  "/STATISTICS COEFF OUTS R ANOVA",
+                  "/DEPENDENT=Y /METHOD=ENTER X1 /METHOD=ENTER X2",
+                  "/SAVE ZPRED ZRESID."))
+  expect_match(r$r_code, "the syntax also asked for", fixed = TRUE)
+  expect_match(r$r_code, "/DESCRIPTIVES (the Descriptive Statistics", fixed = TRUE)
+  expect_match(r$r_code, "/STATISTICS OUTS (the Excluded Variables table)", fixed = TRUE)
+  expect_match(r$r_code, "/SAVE (SPSS writes the saved diagnostics", fixed = TRUE)
+  expect_match(r$r_code, "reported as absent", fixed = TRUE)
+})
+
+test_that("OUTS is only named where SPSS would have had something to exclude", {
+  # OUTS sits on 670 of the corpus's 679 /STATISTICS lines. With one ENTER
+  # block SPSS prints no Excluded Variables table either, so a note there would
+  # be noise rather than a finding.
+  one <- conv("REGRESSION /STATISTICS COEFF OUTS R ANOVA /DEPENDENT=Y /METHOD=ENTER X1.")
+  expect_false(grepl("Excluded Variables", one$r_code, fixed = TRUE))
+  two <- conv(paste("REGRESSION /STATISTICS COEFF OUTS R ANOVA",
+                    "/DEPENDENT=Y /METHOD=ENTER X1 /METHOD=ENTER X2."))
+  expect_match(two$r_code, "Excluded Variables", fixed = TRUE)
+  # A selection method also excludes variables, but /METHOD=STEPWISE returns on
+  # the olsrr path well above the jmv emission, so none of these notes -- and
+  # none of the option gating -- applies to it at all. Pinned so a later change
+  # that routes stepwise through jmv cannot do so silently.
+  step <- conv("REGRESSION /STATISTICS COEFF OUTS R ANOVA /DEPENDENT=Y /METHOD=STEPWISE X1 X2.")
+  expect_match(step$r_code, "olsrr::ols_step_both_p", fixed = TRUE)
+  expect_false(grepl("jmv::linReg", step$r_code, fixed = TRUE))
+})
+
+test_that("/MISSING PAIRWISE is a WARNING, because it changes the NUMBERS", {
+  # jmv::linReg deletes listwise and offers no alternative, so this is not a
+  # missing table -- every coefficient is estimated on a different N than SPSS
+  # used. 24 of the corpus's 675 /MISSING subcommands ask for it.
+  r <- conv("REGRESSION /MISSING PAIRWISE /DEPENDENT=Y /METHOD=ENTER X1 X2.")
+  expect_match(r$r_code, "WARNING [SPSS]: /MISSING PAIRWISE", fixed = TRUE)
+  expect_match(r$r_code, "can differ from the SPSS output", fixed = TRUE)
+  # TWO-SIDED: the 651-use LISTWISE form, which jmv does match, gets no warning.
+  l <- conv("REGRESSION /MISSING LISTWISE /DEPENDENT=Y /METHOD=ENTER X1 X2.")
+  expect_false(grepl("PAIRWISE", l$r_code, fixed = TRUE))
+})
+
+test_that("the Durbin-Watson note is emitted only where SPSS asked for it", {
+  on  <- conv("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1 /RESIDUALS DURBIN.")
+  off <- conv("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1.")
+  expect_match(on$r_code, "SPSS prints the Durbin-Watson", fixed = TRUE)
+  expect_false(grepl("SPSS prints the Durbin-Watson", off$r_code, fixed = TRUE))
+  # The suppression itself is unconditional: there is no case in which jmv's
+  # simulated p is the right thing to print.
+  expect_match(on$r_code,  "durbin_p = FALSE", fixed = TRUE)
+  expect_match(off$r_code, "durbin_p = FALSE", fixed = TRUE)
 })
 
 # ---------------------------------------------------------------------------
@@ -132,5 +248,11 @@ test_that("TWO-SIDED: a REGRESSION with neither subcommand turns nothing on", {
   # A prefix matcher that fired on everything would satisfy the test above.
   o <- getFromNamespace(".spss_regression_options", "spss2rmarkdown")
   bare <- o("REGRESSION /DEPENDENT=Y /METHOD=ENTER X1.")
-  expect_false(any(unlist(bare)))
+  # `ci_level` is a LEVEL, not a switch: it carries the width of an interval
+  # that `ci`/`ciStdEst` decide whether to emit at all, so its default is not
+  # something being "turned on". Every other field is a gate and must be FALSE.
+  gates <- bare[!names(bare) %in% "ci_level"]
+  expect_true(all(vapply(gates, is.logical, logical(1))))
+  expect_false(any(unlist(gates)))
+  expect_equal(bare$ci_level, 95)
 })
