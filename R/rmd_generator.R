@@ -276,7 +276,7 @@ s2r_spss_reg_tables <- function(res, durbin_p = FALSE, model_comp = TRUE) {
 #   'names' attribute [49] must be the same length as the vector [0]
 #
 # where 49 is ncol(data). Reproduced 2026-09-05 against jmv 2.7.7 / R 4.4.0
-# with round-3-spss uh3n8 "Syntax 7_building variable indexes.sps" +
+# with the corpus uh3n8 "Syntax 7_building variable indexes.sps" +
 # "Data 1_Ground file_Complete dataset all years.sav"; the two-sided control
 # (the same call on a column that IS present) succeeds, so jmv is healthy and
 # the defect is purely the message. Relayed verbatim by the chunk's tryCatch it
@@ -404,7 +404,7 @@ s2r_spss_reg_tables <- function(res, durbin_p = FALSE, model_comp = TRUE) {
 # message, because there is nothing to act on and the defect looks like a
 # harness artifact rather than a data problem.
 #
-# Observed on round-3-spss "Syntax_ Exploring factor analysis...", where the
+# Observed on the corpus "Syntax_ Exploring factor analysis...", where the
 # swallowed message was the actual diagnosis: "Can't subset columns that don't
 # exist. Columns `PASTI00`, `PAMA02`, ... don't exist."
 #
@@ -827,7 +827,7 @@ names(data) <- normalize_spss_names(names(data))
 # avoid the closure-is-not-subsettable error in R 4.4.0 when d[] is called on
 # NULL. The cwd bug fix (knit_root_dir) keeps data loading correctly so this
 # branch is rarely hit, but it prevents a cascade if the load chunk ever
-# fails for any other reason. See docs/handoff/2026-06-06-clean_data-defensive-wrapping-finding.md.
+# fails for any other reason.
 clean_data <- function(d) {{
   if (is.null(d) || !is.data.frame(d) || ncol(d) == 0) return(d)
   d[] <- lapply(d, function(x) {{

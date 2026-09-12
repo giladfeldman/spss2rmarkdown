@@ -41,7 +41,7 @@ test_that("convert_compute emits a normal mutate for a valid target (baseline pr
 test_that("COMPUTE x = $SYSMIS becomes mutate(X = NA), not broken `= $SYSMIS`", {
   # $SYSMIS is the SPSS system-missing CONSTANT. Passed through verbatim it
   # leaked a bare `$` -> `dplyr::mutate(X = $SYSMIS)` -> "unexpected '$'", which
-  # nuked the chunk and every downstream IF referencing x (round-3-spss
+  # nuked the chunk and every downstream IF referencing x (the corpus
   # Study2_Recall_MainAnalyses: COMPUTE GROUP_new = $SYSMIS then IF (GROUP=1)...).
   res <- convert_compute(
     list(variables = list(target = "GROUP_new", expression = "$SYSMIS"),

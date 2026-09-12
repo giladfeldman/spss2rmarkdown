@@ -1,6 +1,6 @@
 # Regression tests for EXAMINE variable extraction and AGGREGATE conversion.
 #
-# Both were surfaced by round-3-spss item 2019F_SPSS4UROP:
+# Both were surfaced by corpus item 2019F_SPSS4UROP:
 #   * EXAMINE had NO branch in extract_variables(), so `variables$all` stayed
 #     empty -> convert_examine() emitted "# EXAMINE: No variables specified"
 #     -> an invalid `.res <- # EXAMINE: ...` assignment -> an

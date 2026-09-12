@@ -2,7 +2,7 @@
 # the target keeps its prior value. dplyr::if_else(cond, val, old) instead
 # yields NA where cond is NA — destroying values SPSS would have preserved.
 #
-# Real-world catch (round-1 "Math is cool", 2026-08-04): the .sav declares
+# Real-world catch (corpus item "Math is cool", 2026-08-04): the .sav declares
 # age=-66 as user-missing, haven::read_sav (user_na = FALSE) imports it as NA;
 # `IF (age = -66) MissingData=1.` / `IF (age ~= -66) MissingData=0.` then
 # turned all 61 shipped MissingData=1 rows into NA, so the downstream

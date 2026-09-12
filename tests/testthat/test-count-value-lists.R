@@ -1,6 +1,6 @@
 # Regression tests for COUNT with multi-value criteria.
 #
-# Surfaced 2026-08-04 by round-3-spss item
+# Surfaced 2026-08-04 by the corpus item
 # "Full Syntax Self-Reporting News Use In-situ and in Retrospect", which
 # rendered YELLOW with "Error in parse(text = input): unexpected ','".
 #
@@ -83,7 +83,7 @@ test_that("COUNT single value keeps correct semantics", {
 
 # --- Mixed / keyword criteria -------------------------------------------------
 # Found by sweeping the corpus for other COUNT shapes after the first fix:
-# test-corpus/spss/archive/code-only/osf/osf_67e67b55954d018c24bc_250304.sps uses
+# OSF syntax file osf_67e67b55954d018c24bc_250304.sps uses
 #   count misloJEZ = jEZlo1 ... (missing, lo thru -1).
 #   count misHealth = nochrom mmse smmse (lo thr -1).
 # i.e. a criterion is really a LIST OF TERMS (value | range | MISSING), matched

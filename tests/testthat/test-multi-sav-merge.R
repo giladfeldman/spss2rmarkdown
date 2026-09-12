@@ -1,6 +1,6 @@
 # Regression tests for the multi-.sav merge + the anovaRM missing-measure guard.
 #
-# Surfaced by round-3-spss item Analyses.sps (3apxv), which is paired with TWO
+# Surfaced by corpus item Analyses.sps (3apxv), which is paired with TWO
 # row-aligned .sav files (DataMainDV.sav 25 cols, DataQuest.sav 13 cols, both 40
 # rows, sharing GROUP). The syntax references variables spanning both files with
 # no MATCH FILES, so loading only the primary made jmv fail ("Argument 'vars'

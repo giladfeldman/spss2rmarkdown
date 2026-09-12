@@ -168,7 +168,7 @@ test_that("per-analysis FILTER block for an IF-defined filter rebuilds if_else(c
 
 test_that("per-analysis FILTER block recomputes the filter column so it parses + self-contains", {
   # Regression for the 29x "In argument: .data[[\"FILTER_.\"]]" failure in
-  # round-1/spss/SPSS syntax: COMPUTE filter_$ lives in another local() scope, so
+  # SPSS syntax: COMPUTE filter_$ lives in another local() scope, so
   # the per-analysis filter ran on data without the column. The block must now
   # re-emit mutate(FILTER_. = <cond>) before filtering.
   sps <- tempfile(fileext = ".sps")

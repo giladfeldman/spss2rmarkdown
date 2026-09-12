@@ -1,7 +1,7 @@
 # test-ttest-groups.R — T-TEST GROUPS=g(v1 v2) value-pair semantics.
 #
 # Regression tests for the 2026-08-04 iterate cycle-1 findings on
-# Study2_Recall_MainAnalyses_Syntax (round-3-spss): SPSS
+# Study2_Recall_MainAnalyses_Syntax (the corpus): SPSS
 #   T-TEST GROUPS=GROUP(1 0) /VARIABLES=a b c d e
 # means "compare cases with GROUP==1 against cases with GROUP==0, in that
 # order, for EACH of the five variables". The converter (a) never subset the

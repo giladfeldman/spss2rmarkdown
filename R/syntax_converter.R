@@ -498,7 +498,7 @@ jmv::descriptives(
 # SPSS reads `/VARIABLES = A B C WITH X Y Z BY ctrl` as a RECTANGULAR request:
 # the |x| * |y| cross pairs of {A,B,C} against {X,Y,Z}, optionally partialling
 # out the BY variables. Verified against the frozen SPSS output for the corpus
-# file osf_5a91c46cda91d4000fb0_sample4 (round-2-spss/2-ground-truth), where the
+# file osf_5a91c46cda91d4000fb0_sample4 (the frozen SPSS listing), where the
 # printed tables put the x variables in rows and the y variables in columns.
 # ---------------------------------------------------------------------------
 
@@ -1095,7 +1095,7 @@ jmv::anovaRM(
     # reports a SOFT "Analysis skipped:" note rather than an error, so the
     # generator's general pre-flight must stand down here -- otherwise the same
     # condition is reported twice, and the harder of the two wins (measured
-    # 2026-09-05: round-3-spss/"Analyses" went GREEN -> YELLOW purely from the
+    # 2026-09-05: the corpus/"Analyses" went GREEN -> YELLOW purely from the
     # double guard). One condition, one report.
     return(list(r_code = r_code, packages = "jmv",
                 analysis_type = "Repeated-Measures ANOVA",
@@ -1248,7 +1248,7 @@ extract_stepwise_pin_pout <- function(cmd_raw) {
 # distinct values STRADDLING .05. In a report whose purpose is reproducibility
 # that is the most serious defect class there is.
 #
-# And it was never requested. Two-sided control on the round-2 `sample4` pair:
+# And it was never requested. Two-sided control on the `sample4` pair:
 # `/RESIDUALS` 0 and `DURBIN` 0 in the .sps, `Durbin` 0 in the frozen SPSS gold,
 # against `REGRESSION` 203 in the .sps and `Model Summary` 256 in the gold -- so
 # the zeros are real zeros, and we were inventing 203 autocorrelation tables.
@@ -3144,7 +3144,7 @@ convert_spss_expression <- function(expr) {
   # function). `COMPUTE x = $SYSMIS.` initializes x to missing. Passed through
   # verbatim it leaks a bare `$` into the generated R (`mutate(x = $SYSMIS)` ->
   # "unexpected '$'"), breaking the whole chunk and every downstream `IF` that
-  # references x (round-3-spss Study2/3/4_MainAnalyses: `COMPUTE GROUP_new =
+  # references x (the corpus Study2/3/4_MainAnalyses: `COMPUTE GROUP_new =
   # $SYSMIS` then `IF (GROUP=1) GROUP_new = 2`). Translate to NA. Do this FIRST,
   # before the `$` can confuse later transforms. (The SYSMIS(x)/MISSING(x)
   # function forms are handled separately below.)
@@ -3406,7 +3406,7 @@ convert_spss_expression <- function(expr) {
   # expressions: without it, R's parser breaks on `$` (it's the subset
   # operator) and even when it doesn't break, the variable name doesn't
   # match the column name in `data`. Surfaces 190 parse errors in the
-  # round-2 outlier with a single change.
+  # corpus outlier with a single change.
   #
   # Applied last so all SPSS-specific tokens (e.g. EXP, MISSING) have
   # already been rewritten -- this ONLY rewrites variable identifiers.

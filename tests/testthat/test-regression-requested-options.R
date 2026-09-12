@@ -14,7 +14,7 @@
 # p = .05. For a tool whose entire purpose is reproducible reports, that is the
 # most serious defect class there is.
 #
-# And SPSS never asked for it. Two-sided control over the round-2 sample4 pair:
+# And SPSS never asked for it. Two-sided control over the `sample4` pair:
 #
 #   "/RESIDUALS" in the .sps ............   0
 #   "DURBIN"     in the .sps ............   0

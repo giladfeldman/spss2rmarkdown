@@ -1,6 +1,6 @@
 # SPSS `var1 TO varN` range expansion.
 #
-# Open finding #6 (2026-06-29 iterate handoff): when a .sps is paired with
+# Open finding #6 (2026-06-29): when a .sps is paired with
 # MULTIPLE .sav files, or the range names were COMPUTE-created at runtime (so
 # they are in no .sav at all), the SAV-dictionary lookup fails and the literal
 # keyword "TO" leaked into the generated jmv/dplyr call -> jmv crash
@@ -161,7 +161,7 @@ test_that("expand_spss_variables flags a genuinely unresolvable range", {
 # was emitted into jmv::linReg(blocks = ...) verbatim. jmv then failed with an
 # opaque "object 'XVE8' not found", while SPSS itself expands the range and
 # reports a complete Model Summary/ANOVA/Coefficients for all nine predictors
-# (round-1 GT fw-performance-syntax-final.txt line 975 lists session1..session9).
+# (the frozen SPSS gold fw-performance-syntax-final.txt line 975 lists session1..session9).
 #
 # The literal "TO" must never survive into a method block.
 

@@ -383,7 +383,7 @@ annotate_filter_state <- function(parsed) {
 #'   DATASET NAME DataSet4.           -> names the active dataset
 #'   DATASET ACTIVATE DataSet4.       -> makes that named dataset active again
 #'
-#' Four round-3-spss items in the uh3n8 deposit ("Syntax 2_counting missing",
+#' Four corpus items in the uh3n8 deposit ("Syntax 2_counting missing",
 #' "Syntax 6_reliability measures", "Syntax 7_building variable indexes",
 #' "Syntax_ Exploring factor analysis ...") run the SAME analyses against 2-3
 #' waves this way. Their frozen golds name several input files each, so no
@@ -573,7 +573,7 @@ split_commands <- function(syntax) {
     # SPSS's interactive mode (what a syntax window runs) ends a command at the
     # "." *or* at a blank line. Skipping blank lines instead made an
     # unterminated command swallow everything up to the next period, which is
-    # not what SPSS does. Measured on round-3-spss/uh3n8 "Syntax 7_building
+    # not what SPSS does. Measured on OSF deposit uh3n8 "Syntax 7_building
     # variable indexes.sps", where the researcher omitted the "." on line 84:
     #
     #     des risk_per          <- line 84, no terminator
@@ -1555,7 +1555,7 @@ extract_variables <- function(cmd, command_type) {
 #' "WITH", and the analysis-chunk pre-flight in rmd_generator.R aborted the
 #' whole analysis with "variables not present in the dataset: 'WITH'" --
 #' measured on the corpus file
-#' `round-2-spss/3-converted-local/spss/osf_5a91c46cda91d4000fb0_sample4.sps`,
+#' `osf_5a91c46cda91d4000fb0_sample4.sps`,
 #' 14 of its 16 PARTIAL CORR commands produced no output at all. CORRELATIONS
 #' went the other way: [extract_variables_clause()] silently DROPPED the
 #' keyword, so the converter received the union of both sides and emitted a
@@ -1639,7 +1639,7 @@ extract_variables_clause <- function(cmd) {
     #   Totalnuminternet          in the dataset: 'FRE'")
     #   TotalnumSocial.
     #
-    # (round-3-spss/rjvq2 "Full Syntax Self-Reporting...", lines 346-349; the
+    # (OSF deposit rjvq2 "Full Syntax Self-Reporting...", lines 346-349; the
     # frozen gold records SPSS running it fine, N Valid 1411 on all three.)
     #
     # Both substitutions below already work across newlines on R's default

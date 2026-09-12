@@ -159,7 +159,7 @@ test_that("EXEC abbreviation maps to EXECUTE", {
 })
 
 # --- 3-letter command abbreviations (SPSS accepts these everywhere) ----------
-# Round-3 OSF corpus uses DES/FRE/EXE/SEL IF/VAL LAB/VAR LAB heavily; without
+# The OSF corpus uses DES/FRE/EXE/SEL IF/VAL LAB/VAR LAB heavily; without
 # these the procedures fell through to UNSUPPORTED and produced no output.
 
 test_that("DES abbreviation maps to DESCRIPTIVES", {

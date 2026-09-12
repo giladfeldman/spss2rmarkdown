@@ -12,7 +12,7 @@
 #      leaving us unable to say whether the researcher's syntax is broken
 #      (SOURCE_DEFECT) or we broke it (OURS).
 #
-# Reproduced locally against jmv 2.7.7 / R 4.4.0 with the round-3-spss pairing
+# Reproduced locally against jmv 2.7.7 / R 4.4.0 with the corpus pairing
 # uh3n8 "Syntax 7_building variable indexes.sps" + "Data 1_Ground file_Complete
 # dataset all years.sav" (49 cols, no INTCOM); the two-sided control
 # jmv::descriptives(vars = <an existing column>) succeeds, so jmv itself is
@@ -186,7 +186,7 @@ test_that("a converter that guards its own variables is not pre-flighted twice",
   # already checks its within-subjects measures against names(data) and reports
   # a deliberate SOFT "**Analysis skipped:**" note. Adding the general
   # pre-flight on top reported the same condition twice, and the harder report
-  # won: round-3-spss/"Analyses" went GREEN -> YELLOW with no change in what the
+  # won: the corpus/"Analyses" went GREEN -> YELLOW with no change in what the
   # analysis actually did. A converter that sets `self_guards_variables` owns
   # the reporting; the generator stands down.
   gen <- getFromNamespace("generate_rmd", "spss2rmarkdown")

@@ -1,7 +1,7 @@
 # test-conversion-notes-dangling-ref.R — the no-data guard's "see the
 # Conversion Notes section" promise must not dangle.
 #
-# Found by the 2026-08-04 Sonnet canary audit on round-2-spss Syntax_Hyp4 (a
+# Found by the 2026-08-04 Sonnet canary audit on the corpus Syntax_Hyp4 (a
 # no-paired-.sav item): the load-data stub and the data-guard chunk both tell
 # the reader to consult the "Conversion Notes" section for diagnostics, but
 # the section was only emitted when the caller passed a non-empty

@@ -1,6 +1,6 @@
 # test-reliability-no-omega.R — RELIABILITY must not fabricate omega.
 #
-# Found by the 2026-08-04 Sonnet canary audit on round-2-spss sample4: every
+# Found by the 2026-08-04 Sonnet canary audit on the corpus sample4: every
 # `RELIABILITY /MODEL=ALPHA` translation emitted jmv::reliability(...,
 # omegaScale = TRUE, omegaItems = TRUE) — McDonald's omega, a statistic SPSS's
 # RELIABILITY procedure never computes. The report therefore showed scale- and

@@ -1,6 +1,6 @@
 # Regression tests for FACTOR and MEANS variable extraction.
 #
-# Surfaced 2026-08-04 by round-3-spss item
+# Surfaced 2026-08-04 by the corpus item
 # "Syntax_ Exploring factor analysis for refining variables_risk", which
 # rendered YELLOW with two `object '.res' not found` analysis errors.
 #

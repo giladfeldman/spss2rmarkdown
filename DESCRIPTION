@@ -22,6 +22,7 @@ Suggests:
     jmv,
     withr,
     olsrr,
+    ppcor,
     lubridate,
     tidyr,
     ggplot2,

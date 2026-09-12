@@ -1,5 +1,5 @@
-# Regression tests for the RECODE defects surfaced by the ScienceArena
-# diagnostic report (2026-08-04) plus latent defects found while verifying it.
+# Regression tests for the RECODE defects surfaced by an external diagnostic
+# report (2026-08-04) plus latent defects found while verifying it.
 #
 # Prior behavior (each verified to FAIL before the fix):
 #   * lowercase `thru` entered the THRU branch (case-insensitive grepl) but the

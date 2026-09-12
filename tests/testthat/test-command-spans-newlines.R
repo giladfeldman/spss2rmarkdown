@@ -10,7 +10,7 @@
 #   TotalnumSocial.
 #
 # Found 2026-09-09 while triaging the conversion corpus. Corpus item
-# round-3-spss/rjvq2 "Full Syntax Self-Reporting News Use In-situ and in
+# OSF deposit rjvq2 "Full Syntax Self-Reporting News Use In-situ and in
 # Retrospect.sps", lines 346-349. Measured at the real call site before the
 # fix, `parse_sps()` on that file returned, for that command:
 #

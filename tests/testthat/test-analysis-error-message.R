@@ -1,6 +1,6 @@
 # The analysis-chunk error handler must always render a NON-EMPTY reason.
 #
-# Found 2026-08-04 on round-3-spss/"Syntax_ Exploring factor analysis for
+# Found 2026-08-04 on the corpus/"Syntax_ Exploring factor analysis for
 # refining variables_risk": the report contained
 #   <p><strong>Analysis error:</strong></p>
 # with no message at all. The underlying condition was a real and diagnosable
